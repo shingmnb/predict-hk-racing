@@ -17,6 +17,14 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
+from domain import (  # noqa: E402
+    MIN_QUOTE_CHARS,
+    derive_place_slots,
+    normalise_text,
+    quote_supported,
+    registered as feature_registered,
+    describe as describe_features,
+)
 from racing_model import (  # noqa: E402
     bootstrap_logloss_difference,
     fit_model,
@@ -155,9 +163,11 @@ def init_db(path: str) -> None:
             """)
 
 
-def validate_card(card: dict) -> list[str]:
-    if card.get("schema_version") != "1.0":
-        raise ValueError("Card schema_version must be '1.0'")
+def validate_card(card: dict, *, allow_unknown_features: bool = False) -> list[str]:
+    schema = card.get("schema_version")
+    if schema not in {"1.0", "1.1"}:
+        raise ValueError("Card schema_version must be '1.0' or '1.1'")
+    strict_evidence = schema == "1.1"
     race = card.get("race", {})
     for field in ["race_id", "meeting_date", "venue", "race_no", "off_time", "distance_m"]:
         if field not in race:
@@ -181,8 +191,11 @@ def validate_card(card: dict) -> list[str]:
         raise ValueError("race.race_no must be a positive integer")
     if not isinstance(race.get("distance_m"), int) or race["distance_m"] <= 0:
         raise ValueError("race.distance_m must be a positive integer")
-    slots = race.get("place_slots", 3)
-    if not isinstance(slots, int) or not 1 <= slots <= 3:
+    declared = race.get("declared_starters")
+    if declared is not None and (isinstance(declared, bool) or not isinstance(declared, int) or declared < 2):
+        raise ValueError("race.declared_starters must be an integer of at least 2")
+    slots = race.get("place_slots")
+    if slots is not None and (isinstance(slots, bool) or not isinstance(slots, int) or not 1 <= slots <= 3):
         raise ValueError("race.place_slots must be 1, 2 or 3")
 
     sources = card.get("sources")
@@ -196,8 +209,14 @@ def validate_card(card: dict) -> list[str]:
         source_ids.add(source_id)
         if not source.get("title"):
             raise ValueError(f"Source {source_id} needs a title")
+        if strict_evidence and not source.get("url"):
+            raise ValueError(f"Source {source_id} needs a url in schema 1.1")
+        if source.get("excerpt") is not None and not isinstance(source["excerpt"], str):
+            raise ValueError(f"Source {source_id} excerpt must be a string")
         if source.get("retrieved_at"):
-            parse_ts(source["retrieved_at"], f"source {source_id} retrieved_at")
+            retrieved = parse_ts(source["retrieved_at"], f"source {source_id} retrieved_at")
+            if strict_evidence and retrieved > cutoff:
+                raise ValueError(f"Source {source_id} was retrieved after data_cutoff")
 
     runners = card.get("runners")
     if not isinstance(runners, list) or len(runners) < 2:
@@ -228,6 +247,12 @@ def validate_card(card: dict) -> list[str]:
         for name, value in features.items():
             if name in banned_features:
                 raise ValueError(f"Post-race feature is forbidden: {name}")
+            if not allow_unknown_features and not feature_registered(name):
+                raise ValueError(
+                    f"Unregistered feature on horse {number}: {name}. "
+                    "Register it in scripts/domain.py, or pass --allow-unknown-features "
+                    "to accept the leakage risk."
+                )
             if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
                 raise ValueError(f"Feature {name} on horse {number} must be numeric")
         evidence = runner.get("intent_evidence", [])
@@ -238,6 +263,21 @@ def validate_card(card: dict) -> list[str]:
                 raise ValueError(f"Horse {number} evidence needs signal and note")
             if item.get("source_id") not in source_ids:
                 raise ValueError(f"Horse {number} evidence has an unknown source_id")
+            if strict_evidence:
+                quote = item.get("quote")
+                if not isinstance(quote, str) or len(normalise_text(quote)) < MIN_QUOTE_CHARS:
+                    raise ValueError(
+                        f"Horse {number} evidence needs a verbatim quote of at least "
+                        f"{MIN_QUOTE_CHARS} characters in schema 1.1"
+                    )
+                excerpt = next(
+                    (source.get("excerpt", "") for source in sources if source["source_id"] == item["source_id"]),
+                    "",
+                )
+                if excerpt and not quote_supported(quote, excerpt):
+                    raise ValueError(
+                        f"Horse {number} quote was not found in the excerpt of source {item['source_id']}"
+                    )
             direction = item.get("direction", "neutral")
             if not isinstance(direction, (int, float)) and str(direction).lower() not in {
                 "positive", "negative", "neutral", "1", "-1", "0"
@@ -249,9 +289,20 @@ def validate_card(card: dict) -> list[str]:
                     raise ValueError(f"Evidence {field} must be between 0 and 1")
     if active < 2:
         raise ValueError("At least two active runners are required")
+    reference_field = declared if declared is not None else active
+    expected_slots = derive_place_slots(reference_field)
     warnings = []
+    if slots is None:
+        race["place_slots"] = expected_slots
+    elif slots != expected_slots:
+        warnings.append(
+            f"place_slots={slots} but {reference_field} declared starters imply {expected_slots}; "
+            "the card value is used for place probabilities."
+        )
     if mode == "historical":
         warnings.append("歷史重建資料：只可當回測輸入，唔可以冒充當日實時賽前預測。")
+    if not strict_evidence:
+        warnings.append("schema 1.0 卡：意圖證據未有逐字 quote，建議改用 schema 1.1。")
     return warnings
 
 
@@ -342,7 +393,7 @@ def stripped_row(row: dict) -> dict:
 
 def command_import_card(args) -> dict:
     card = read_json(args.file)
-    warnings = validate_card(card)
+    warnings = validate_card(card, allow_unknown_features=args.allow_unknown_features)
     race = card["race"]
     digest = payload_hash(card)
     with connect(args.db) as db:
@@ -431,8 +482,16 @@ def command_evaluate(args) -> dict:
             query += " WHERE model_version = ?"
             params.append(args.model_version)
         query += " ORDER BY created_at, rowid"
+        kinds = None if args.all_kinds else {
+            item.strip() for item in args.kinds.split(",") if item.strip()
+        }
         selected = {}
+        excluded: dict[str, int] = {}
         for row in db.execute(query, params).fetchall():
+            kind = row["forecast_kind"]
+            if kinds is not None and kind not in kinds:
+                excluded[kind] = excluded.get(kind, 0) + 1
+                continue
             selected[(row["model_version"], row["race_id"])] = row
         groups = {}
         pending = 0
@@ -459,6 +518,8 @@ def command_evaluate(args) -> dict:
         report = {
             "kind": "prediction-evaluation-v1",
             "created_at": now_iso(),
+            "scored_forecast_kinds": "all" if kinds is None else sorted(kinds),
+            "excluded_by_forecast_kind": excluded,
             "snapshot_policy": "latest prediction per race and model version",
             "pending_races": pending,
             "models": report_groups,
@@ -476,6 +537,14 @@ def command_fit(args) -> dict:
     if not VERSION_PATTERN.match(args.model_version):
         raise ValueError("model_version must use 1-64 letters, digits, dots, underscores or hyphens")
     features = [item.strip() for item in args.features.split(",") if item.strip()]
+    if not features:
+        raise ValueError("At least one feature is required")
+    unknown = [name for name in features if not feature_registered(name)]
+    if unknown and not args.allow_unknown_features:
+        raise ValueError(
+            "Unregistered features: " + ", ".join(unknown)
+            + ". Register them in scripts/domain.py or pass --allow-unknown-features."
+        )
     with connect(args.db) as db:
         if db.execute("SELECT 1 FROM models WHERE model_version = ?", (args.model_version,)).fetchone():
             raise ValueError("model_version already exists; create a new version instead")
@@ -487,6 +556,16 @@ def command_fit(args) -> dict:
         )
         if model["training"]["race_count"] < args.min_races:
             raise ValueError("Too few usable races after excluding dead heats or incomplete results")
+        thin = [
+            f"{name} ({stats['coverage']:.2f})"
+            for name, stats in model["normalisation"].items()
+            if stats["coverage"] < args.min_feature_coverage
+        ]
+        if thin:
+            raise ValueError(
+                f"Features below {args.min_feature_coverage:.2f} coverage: " + ", ".join(thin)
+            )
+        model["feature_definitions"] = describe_features(features)
         model.update({"model_version": args.model_version, "created_at": now_iso(), "train_before": args.train_before})
         db.execute(
             "INSERT INTO models VALUES (?, ?, ?, ?)",
@@ -655,6 +734,11 @@ def build_parser() -> argparse.ArgumentParser:
         command = sub.add_parser(name, help=help_text)
         command.add_argument("--db", required=True)
         command.add_argument("--file", required=True)
+        if name == "import-card":
+            command.add_argument(
+                "--allow-unknown-features", action="store_true",
+                help="Accept feature names missing from scripts/domain.py (turns off the leakage guard)",
+            )
 
     predict = sub.add_parser("predict", help="Freeze an append-only race prediction")
     predict.add_argument("--db", required=True)
@@ -667,6 +751,14 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate = sub.add_parser("evaluate", help="Evaluate frozen predictions against official results")
     evaluate.add_argument("--db", required=True)
     evaluate.add_argument("--model-version")
+    evaluate.add_argument(
+        "--kinds", default="pre-race",
+        help="Comma-separated forecast kinds to score; default is live pre-race forecasts only",
+    )
+    evaluate.add_argument(
+        "--all-kinds", action="store_true",
+        help="Score every forecast kind together (legacy behaviour, not recommended)",
+    )
     evaluate.add_argument("--output")
 
     fit = sub.add_parser("fit", help="Fit a candidate conditional-logit model")
@@ -678,6 +770,14 @@ def build_parser() -> argparse.ArgumentParser:
     fit.add_argument("--l2", type=float, default=0.01)
     fit.add_argument("--learning-rate", type=float, default=0.05)
     fit.add_argument("--epochs", type=int, default=300)
+    fit.add_argument(
+        "--min-feature-coverage", type=float, default=0.5,
+        help="Reject training when a feature is observed for less than this share of runners",
+    )
+    fit.add_argument(
+        "--allow-unknown-features", action="store_true",
+        help="Train on feature names missing from scripts/domain.py (turns off the leakage guard)",
+    )
     fit.add_argument("--output")
 
     backtest = sub.add_parser("backtest", help="Run expanding-window out-of-sample tests")
@@ -697,7 +797,16 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def configure_stdio() -> None:
+    """Windows consoles default to cp950; the report is full of Chinese text."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(encoding="utf-8", errors="replace")
+
+
 def main() -> int:
+    configure_stdio()
     args = build_parser().parse_args()
     try:
         if args.command == "init":

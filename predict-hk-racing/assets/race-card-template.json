@@ -1,5 +1,5 @@
 {
-  "schema_version": "1.0",
+  "schema_version": "1.1",
   "collection_mode": "live",
   "captured_at": "2026-10-24T20:00:00+08:00",
   "data_cutoff": "2026-10-24T20:00:00+08:00",
@@ -14,7 +14,9 @@
     "surface": "turf",
     "going": "good",
     "class_name": "Class 4",
-    "place_slots": 3
+    "declared_starters": 12,
+    "place_slots": 3,
+    "_note": "示例只列兩匹馬；正式卡要列全部 runners。declared_starters 用嚟推導 place_slots（本地賽 7 匹或以上 3 位、4-6 匹 2 位）。"
   },
   "sources": [
     {
@@ -22,7 +24,8 @@
       "title": "馬會官方排位表（示例佔位）",
       "url": "https://www.hkjc.com/",
       "retrieved_at": "2026-10-24T20:00:00+08:00",
-      "official": true
+      "official": true,
+      "excerpt": "示例原文節錄：練馬師表示今仗以爭勝為目標，並會交由主帥策騎。"
     }
   ],
   "runners": [
@@ -46,12 +49,13 @@
       },
       "intent_evidence": [
         {
-          "signal": "declared_gear_change",
+          "signal": "trainer_declared_target",
           "direction": "positive",
           "strength": 0.3,
           "confidence": 0.7,
           "source_id": "S1",
-          "note": "示例：配備有改動；方向只屬候選假設，須另行回測。"
+          "quote": "練馬師表示今仗以爭勝為目標",
+          "note": "示例：quote 必須逐字出現喺 source 的 excerpt；方向只屬候選假設，須另行回測。"
         }
       ]
     },
