@@ -150,3 +150,37 @@ model["training"]["best_epoch"], model["training"]["validation_logloss"]
 - 概率高唔等於值博，概率低亦唔等於冇機會。值博需要比較同一時點可成交賠率、水位、風險同模型優勢。
 - 只輸出市場基準時，唔好同時聲稱跑贏市場或有獨家預測。
 - 輸出整體不確定性同資料缺口；唔好講「穩贏」「必中」「內幕」。
+
+## 注碼層（staking）
+
+預測概率唔等於投注。`scripts/staking.py` 係純函數模組（無 I/O、無新依賴）：
+
+```python
+from staking import edge, kelly_fraction, stake_size, plan_race
+
+edge(0.20, 6.0)                 # 0.20  → EV +20%
+kelly_fraction(0.20, 6.0)       # 0.04  → full Kelly 4% bankroll
+
+outcome = stake_size(0.20, 6.0, bankroll=10_000, kelly_multiplier=0.25)
+outcome["stake"], outcome["status"]
+
+plan = plan_race(bets, bankroll=10_000, max_race_fraction=0.05)
+```
+
+規則（全部可調，預設值偏保守）：
+
+| 參數 | 預設 | 作用 |
+|---|---|---|
+| `kelly_multiplier` | 0.25 | fractional Kelly；Benter 建議 1/2–1/3，因為 edge 常被高估約 2 倍 |
+| `min_edge` | 0.02 | edge 低於 2% 直接跳過 |
+| `max_bankroll_fraction` | 0.02 | 單注最多 2% bankroll |
+| `max_pool_fraction` | 0.001 | 注碼 ≤ 池的 0.1%，避免自己壓低派彩 |
+| `unit` / `min_stake` | 10 / 10 | 向下取整至 HK$10；不足一注就跳過 |
+| `max_race_fraction` | 0.05 | 同一場總注碼上限（同場注項相關） |
+
+- `edge = p × odds − 1`；`f* = (p × odds − 1) / (odds − 1)`。
+- 池上限用 `pool_size × max_pool_fraction`；彩池賠率已含抽水，唔需要再乘 0.825。
+- `plan_race` 會先逐注計 Kelly，總額超過 race cap 就按比例縮細再取整，並將低於最小注的注項標記 `scaled_below_minimum`；總額亦唔會超過當時 bankroll。
+- `value-backtest --stake kelly` 直接用呢個共用注碼層：`--kelly-multiplier` 預設 0.25，`--max-race-fraction` 預設 0.05；同場有多個正 edge 注項時用 `plan_race`，唔再另設 full Kelly 公式。
+- `--pool-size` 只係明確輸入嘅回測假設，會套用於每場並記入報告；佢唔係由歷史資料自動觀測嘅彩池，唔好當成實績證據。
+

@@ -25,11 +25,7 @@ from domain import (  # noqa: E402
     registered as feature_registered,
     describe as describe_features,
 )
-from decision import (  # noqa: E402
-    coverage_slices,
-    kelly_fraction,
-    settle_stream,
-)
+from decision import coverage_slices, settle_stream  # noqa: E402
 from racing_model import (  # noqa: E402
     bootstrap_logloss_difference,
     information_gain_vs_market,
@@ -877,6 +873,11 @@ def command_value_backtest(args) -> dict:
             cap=args.cap,
             bankroll=args.bankroll,
             min_edge=args.min_edge,
+            kelly_multiplier=args.kelly_multiplier,
+            max_race_fraction=args.max_race_fraction,
+            pool_size=args.pool_size,
+            max_pool_fraction=args.max_pool_fraction,
+            unit=args.stake_unit,
         )
         report = {
             "kind": "value-backtest-v1",
@@ -888,6 +889,8 @@ def command_value_backtest(args) -> dict:
                 "refit_every_races": args.refit_every,
                 "test_after": args.test_after,
                 "test_before": args.test_before,
+                "pool_size_assumption": args.pool_size,
+                "stake_unit": args.stake_unit,
             },
             "settlement": settlement,
         }
@@ -988,9 +991,17 @@ def build_parser() -> argparse.ArgumentParser:
     value.add_argument("--db", required=True)
     value.add_argument("--model-version", required=True)
     value.add_argument("--stake", choices=["flat", "kelly"], default="flat")
-    value.add_argument("--cap", type=float, default=0.01, help="Max share of bankroll per race")
+    value.add_argument("--cap", type=float, default=0.01, help="Max share of bankroll per bet")
     value.add_argument("--bankroll", type=float, default=10000.0)
     value.add_argument("--min-edge", type=float, default=0.0)
+    value.add_argument("--kelly-multiplier", type=float, default=0.25)
+    value.add_argument("--max-race-fraction", type=float, default=0.05)
+    value.add_argument(
+        "--pool-size", type=float,
+        help="Optional win-pool size assumption applied to each backtest race",
+    )
+    value.add_argument("--max-pool-fraction", type=float, default=0.001)
+    value.add_argument("--stake-unit", type=float, default=10.0)
     value.add_argument("--min-train-races", type=int, default=30)
     value.add_argument("--refit-every", type=int, default=5)
     value.add_argument("--test-after", help="Inclusive YYYY-MM-DD")

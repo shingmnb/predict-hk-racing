@@ -159,11 +159,13 @@ python "<SKILL>/scripts/racing_lab.py" value-backtest \
   --db "racing-data/racing.db" \
   --model-version "candidate-2026-10-24" \
   --stake kelly --cap 0.01 --bankroll 10000 \
+  --kelly-multiplier 0.25 --max-race-fraction 0.05 \
   --test-after "2026-10-24" \
   --output "racing-data/evaluations/value.json"
 ```
 
-- `--stake flat|kelly`：flat 用固定比例下注；kelly 用 `edge/(odds-1)`，以 `--cap` 封頂。
+- `--stake flat|kelly`：flat 沿用固定比例、最大 edge 單注；kelly 統一用 `scripts/staking.py` 嘅 fractional Kelly，--cap 限制單注，--max-race-fraction 限制同場總曝險，--stake-unit 控制向下取整。
+- 可另輸入 `--pool-size` 同 `--max-pool-fraction`（預設 0.001）限制彩池衝擊；pool size 係回測假設，會寫入報告，唔係自動觀測嘅歷史數據。
 - 結算優先用官方 `win_dividend`（香港以每 HK$10 報價，程式除以 10），冇先用快照賠率。
 - 報 turnover、ROI、strike rate、max drawdown、期末 bankroll；Kelly 會放大概率估計誤差，ROI 必須由時間外結算證明，唔好預設正回報。
 - `evaluate --coverage 5,10,20,50` 會按預測信心分層，報每層 log loss／Brier／命中率（selective-use），用嚟答「只買邊啲場」。
