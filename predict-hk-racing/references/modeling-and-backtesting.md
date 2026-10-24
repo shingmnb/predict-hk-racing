@@ -143,6 +143,7 @@ model["training"]["best_epoch"], model["training"]["validation_logloss"]
    - 有現任 champion 時，亦要優於 champion，且對 champion 改善嘅原始同調整後區間上端都低於 0；
    - 要求 information gain 時，`information_gain_ci95_excludes_zero` 成立，且調整後區間下端亦高於 0；
    - 宣告特徵塊時，配對 ablation 已完整記錄，且 ablation 原始同調整後區間上端都低於 0；
+   - bootstrap 解析度不足時，adjusted CI 必須留空並記錄 warning，候選版本不得晉升；要增加 `--bootstrap`，或喺睇結果前按登記準則收窄候選家族再重跑；
    - 閘門證據必須 `multiple_comparison_method = "bonferroni"`、`familywise_alpha = 0.05`、`effective_alpha` 同 0.05/n 一致；候選家族改變 → `multiple_comparison_stale` → 拒絕並要求重跑 backtest；舊版報告缺呢啲欄位一律拒絕，冇人手覆寫。
 5. 未通過就記錄 `rejected`，繼續用舊版或市場基準。將新想法列為候選假設，唔好即場改投注規則。
 6. 通過後先記錄 `promoted`；`predict --model-version auto` 會用最新 promoted，冇 promoted 就用市場基準。

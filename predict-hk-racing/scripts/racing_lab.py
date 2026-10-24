@@ -663,6 +663,7 @@ def promotion_eligible(gate: dict) -> bool:
         and candidates >= 1
         and gate.get("multiple_comparison_method") == "bonferroni"
         and gate.get("familywise_alpha") == FAMILYWISE_ALPHA
+        and gate.get("bootstrap_resolution_sufficient") is True
     )
     if policy_valid:
         effective_alpha = gate.get("effective_alpha")
@@ -853,7 +854,23 @@ def command_backtest(args) -> dict:
             and ablation_comparison["ci"][1] is not None
             and ablation_comparison["ci"][1] < 0
         )
-        multiple_comparison_adjusted = all((
+        resolution_comparisons = [comparison]
+        if champion_comparison is not None:
+            resolution_comparisons.append(champion_comparison)
+        if require_information_gain:
+            resolution_comparisons.append(information_gain)
+        if ablation_comparison is not None:
+            resolution_comparisons.append(ablation_comparison)
+        bootstrap_resolution_sufficient = all(
+            item.get("ci_resolution_sufficient") is True for item in resolution_comparisons
+        )
+        bootstrap_resolution_warning = next(
+            (item.get("ci_warning") for item in resolution_comparisons if item.get("ci_warning")),
+            None,
+        )
+        if not bootstrap_resolution_sufficient and bootstrap_resolution_warning is None:
+            bootstrap_resolution_warning = "Adjusted bootstrap CI evidence is unavailable."
+        multiple_comparison_adjusted = bootstrap_resolution_sufficient and all((
             significant_adjusted,
             beats_champion_adjusted,
             information_gain_adjusted_significant if require_information_gain else True,
@@ -878,6 +895,8 @@ def command_backtest(args) -> dict:
             "block_ablation_recorded": block_ablation_recorded,
             "block_ablation_ci95_excludes_zero": block_ablation_significant,
             "block_ablation_adjusted_ci_excludes_zero": block_ablation_adjusted_significant,
+            "bootstrap_resolution_sufficient": bootstrap_resolution_sufficient,
+            "bootstrap_resolution_warning": bootstrap_resolution_warning,
             "candidates_backtested": candidates_in_family,
             "candidates_in_family": candidates_in_family,
             "familywise_alpha": FAMILYWISE_ALPHA,

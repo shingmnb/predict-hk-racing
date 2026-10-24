@@ -199,15 +199,64 @@ class ModelUnitTests(unittest.TestCase):
                 adjusted = function(candidate, market, samples=200, alpha=0.025)
                 self.assertEqual(default["alpha"], 0.05)
                 self.assertEqual(default["ci"], default["ci95"])
+                self.assertTrue(default["ci_resolution_sufficient"])
+                self.assertIsNone(default["ci_warning"])
                 self.assertEqual(adjusted["ci95"], default["ci95"])
                 self.assertEqual(adjusted["alpha"], 0.025)
+                self.assertTrue(adjusted["ci_resolution_sufficient"])
                 self.assertLessEqual(adjusted["ci"][0], default["ci"][0])
                 self.assertGreaterEqual(adjusted["ci"][1], default["ci"][1])
+
+                unadjusted_1000 = function(candidate, market, samples=1000)
+                unresolved = function(candidate, market, samples=1000, alpha=0.001)
+                scale = 999 if function is bootstrap_logloss_difference else 1000
+                self.assertEqual(int((0.001 / 2) * scale), 0)
+                self.assertEqual(unresolved["ci95"], unadjusted_1000["ci95"])
+                self.assertEqual(unresolved["ci"], [None, None])
+                self.assertFalse(unresolved["ci_resolution_sufficient"])
+                self.assertIn("--bootstrap", unresolved["ci_warning"])
                 with self.assertRaises(ValueError):
                     function(candidate, market, samples=10, alpha=0)
         empty = bootstrap_logloss_difference([], [])
         self.assertEqual(empty["ci95"], [None, None])
         self.assertEqual(empty["ci"], [None, None])
+        self.assertFalse(empty["ci_resolution_sufficient"])
+
+    def test_bootstrap_adjusted_upper_bounds_round_outward(self):
+        market_losses = [0.7, 0.4, 0.8, 0.5, 0.6, 0.9]
+        candidate_losses = [0.5, 0.5, 0.6, 0.55, 0.3, 1.1]
+        market = [
+            {"race_id": str(index), "logloss": loss, "runner_count": 10}
+            for index, loss in enumerate(market_losses)
+        ]
+        candidate = [
+            {"race_id": str(index), "logloss": loss, "runner_count": 10}
+            for index, loss in enumerate(candidate_losses)
+        ]
+        pairs = list(zip(candidate, market))
+        differences = [c["logloss"] - m["logloss"] for c, m in pairs]
+        for function in (bootstrap_logloss_difference, information_gain_vs_market):
+            with self.subTest(function=function.__name__):
+                rng = random.Random(20261024)
+                estimates = []
+                for _ in range(20):
+                    if function is bootstrap_logloss_difference:
+                        estimates.append(sum(
+                            differences[rng.randrange(len(pairs))] for _ in range(len(pairs))
+                        ) / len(pairs))
+                    else:
+                        indices = [rng.randrange(len(pairs)) for _ in range(len(pairs))]
+                        resampled_candidate = [pairs[index][0] for index in indices]
+                        resampled_market = [pairs[index][1] for index in indices]
+                        estimates.append(
+                            pseudo_r2(resampled_candidate) - pseudo_r2(resampled_market)
+                        )
+                estimates.sort()
+                report = function(candidate, market, samples=20, alpha=0.12)
+                self.assertTrue(report["ci_resolution_sufficient"])
+                self.assertAlmostEqual(report["ci"][1], estimates[18])
+                self.assertGreater(estimates[18], estimates[17])
+                self.assertGreater(report["ci"][1], estimates[17])
 
     def test_intent_is_shrunk_and_missing_is_unknown(self):
         missing = assess_intent({"intent_evidence": []})
@@ -244,6 +293,7 @@ class PromotionGateUnitTests(unittest.TestCase):
             "block_ablation_recorded": True,
             "block_ablation_ci95_excludes_zero": True,
             "block_ablation_adjusted_ci_excludes_zero": True,
+            "bootstrap_resolution_sufficient": True,
             "candidates_backtested": 1,
             "candidates_in_family": 1,
             "familywise_alpha": 0.05,
@@ -283,6 +333,15 @@ class PromotionGateUnitTests(unittest.TestCase):
         gate = self.eligible_gate()
         gate["champion_improvement_adjusted_ci_excludes_zero"] = False
         self.assertFalse(promotion_eligible(gate))
+
+    def test_unresolved_bootstrap_ci_cannot_promote(self):
+        gate = self.eligible_gate()
+        gate["bootstrap_resolution_sufficient"] = False
+        self.assertFalse(promotion_eligible(gate))
+
+        legacy_gate = self.eligible_gate()
+        del legacy_gate["bootstrap_resolution_sufficient"]
+        self.assertFalse(promotion_eligible(legacy_gate))
 
     def test_legacy_stale_or_wrong_alpha_gate_cannot_promote(self):
         gate = self.eligible_gate()
@@ -864,6 +923,67 @@ class PipelineIntegrationTests(unittest.TestCase):
         bands = report["models"]["market-baseline"]["selective_use"]
         self.assertEqual(bands[0]["coverage_pct"], 50)
         self.assertEqual(bands[0]["race_count"], 2)
+
+    def test_unresolved_adjusted_ci_warns_and_rejects_large_family(self):
+        self.run_cli("init", "--db", self.db)
+        self.build_history(1, 8)
+        self.run_cli(
+            "fit", "--db", self.db, "--model-version", "resolution-v1",
+            "--features", "market_logp,rating", "--train-before", "2026-08-08",
+            "--min-races", 6, "--epochs", 20,
+        )
+        connection = sqlite3.connect(self.db)
+        try:
+            for index in range(49):
+                connection.execute(
+                    """
+                    INSERT INTO evaluation_runs
+                        (evaluation_id, kind, model_version, created_at, report_json)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        f"synthetic-family-evaluation-{index}",
+                        "backtest",
+                        f"synthetic-family-candidate-{index}",
+                        f"2026-08-09T00:00:{index:02d}+00:00",
+                        json.dumps({"kind": "synthetic-family-placeholder"}),
+                    ),
+                )
+            connection.commit()
+        finally:
+            connection.close()
+
+        report = json.loads(
+            self.run_cli(
+                "backtest", "--db", self.db, "--model-version", "resolution-v1",
+                "--min-train-races", 5, "--min-test-races", 2, "--refit-every", 2,
+                "--test-after", "2026-08-06", "--bootstrap", 1000,
+            ).stdout
+        )
+        baseline = report["candidate_minus_baseline_logloss"]
+        information_gain = report["information_gain_vs_market"]
+        for comparison in (baseline, information_gain):
+            self.assertEqual(comparison["alpha"], 0.001)
+            self.assertEqual(comparison["ci"], [None, None])
+            self.assertIsNotNone(comparison["ci95"][0])
+            self.assertFalse(comparison["ci_resolution_sufficient"])
+            self.assertIn("--bootstrap", comparison["ci_warning"])
+
+        gate = report["promotion_gate"]
+        self.assertEqual(gate["candidates_in_family"], 50)
+        self.assertEqual(gate["effective_alpha"], 0.001)
+        self.assertFalse(gate["bootstrap_resolution_sufficient"])
+        self.assertIn("--bootstrap", gate["bootstrap_resolution_warning"])
+        self.assertFalse(gate["multiple_comparison_adjusted"])
+        self.assertFalse(gate["multiple_comparison_stale"])
+        self.assertFalse(gate["eligible"])
+
+        promotion = json.loads(
+            self.run_cli("promote", "--db", self.db, "--model-version", "resolution-v1").stdout
+        )
+        self.assertEqual(promotion["event"], "rejected")
+        self.assertFalse(promotion["promotion_gate"]["bootstrap_resolution_sufficient"])
+        self.assertFalse(promotion["promotion_gate"]["multiple_comparison_stale"])
 
     def test_block_ablation_is_recorded_and_gates_promotion(self):
         self.run_cli("init", "--db", self.db)
