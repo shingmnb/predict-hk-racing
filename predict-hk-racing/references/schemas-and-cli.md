@@ -154,7 +154,7 @@ python "<SKILL>/scripts/racing_lab.py" promote --db "racing-data/racing.db" --mo
 
 ## 位置名額與特徵註冊
 
-`place_slots` 可以省略：程式會用 `declared_starters`（冇填就用 active runners）按馬會規則推導——8 匹或以上 3 位、4-7 匹 2 位、其餘 1 位。若果你寫死一個同 field size 唔相符嘅值，`import-card` 會出 warning 並照用你嘅值（例如有馬退出但 declared starters 未變）。
+`place_slots` 可以省略：程式會用 `declared_starters`（冇填就用 active runners）按本地賽規則推導——7 匹或以上 3 位、4-6 匹 2 位。少於 4 匹時嘅 1 位只係模型近似，唔代表有正式 Place pool。若果你寫死一個同 field size 唔相符嘅值，`import-card` 會出 warning 並照用你嘅值（例如有馬退出但 declared starters 未變）。
 
 特徵註冊表喺 `scripts/domain.py`：每個特徵要寫低單位、來源同定義。加新特徵就喺 `SPECS` 加一項，順手喺 `references/modeling-and-backtesting.md` 講清楚點樣保證佢喺 `data_cutoff` 前已存在。
 

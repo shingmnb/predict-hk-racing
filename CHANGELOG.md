@@ -10,7 +10,7 @@
 - `scripts/domain.py` 特徵註冊表（`FEATURE_REGISTRY`）：未註冊特徵一律拒絕，杜絕改名賽後特徵漏入模型。
 - `fit --min-feature-coverage`：特徵覆蓋率太低（預設 < 0.5）會拒絕訓練。
 - 模型版本會保存 `feature_definitions` 快照，方便日後解讀舊模型。
-- `race.declared_starters` 同自動 `place_slots` 推導（8 匹或以上 3 位、4-7 匹 2 位）。
+- `race.declared_starters` 同自動 `place_slots` 推導（本地賽 7 匹或以上 3 位、4-6 匹 2 位；少於 4 匹只係 1 位模型近似）。
 - `evaluate --kinds` / `--all-kinds`：預設只計 `pre-race` 預測。
 
 ### Changed

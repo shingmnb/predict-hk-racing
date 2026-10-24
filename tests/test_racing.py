@@ -552,7 +552,8 @@ class DomainRuleTests(unittest.TestCase):
     def test_place_slots_follow_hkjc_terms(self):
         self.assertEqual(derive_place_slots(14), 3)
         self.assertEqual(derive_place_slots(8), 3)
-        self.assertEqual(derive_place_slots(7), 2)
+        self.assertEqual(derive_place_slots(7), 3)
+        self.assertEqual(derive_place_slots(6), 2)
         self.assertEqual(derive_place_slots(4), 2)
         self.assertEqual(derive_place_slots(3), 1)
 

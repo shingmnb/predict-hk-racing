@@ -43,7 +43,7 @@
 - 原始網頁／PDF 可存 `racing-data/sources/<race_id>/`；normalized JSON、來源登記同內容雜湊共同構成審計鏈。
 - 輸出引用用當輪工具真正讀過嘅來源；冇讀過唔好引。
 - 意圖證據要保留逐字 `quote`，並把讀到嘅原文段落放入 `source.excerpt`；程式會核對兩者。寫唔出逐字原文，就唔好當證據。
-- `place_slots` 唔填會按 `declared_starters` 自動推導（8 匹或以上 3 位、4-7 匹 2 位）。
+- `place_slots` 唔填會按 `declared_starters` 自動推導（本地賽 7 匹或以上 3 位、4-6 匹 2 位；少於 4 匹只係 1 位模型近似，唔代表有正式 Place pool）。
 
 ## 缺口處理
 

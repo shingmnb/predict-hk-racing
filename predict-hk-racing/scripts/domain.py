@@ -64,8 +64,12 @@ def describe(names: list[str]) -> dict[str, dict[str, str]]:
 
 
 def derive_place_slots(declared_starters: int) -> int:
-    """HKJC place terms: eight or more declared starters pay three places."""
-    if declared_starters >= 8:
+    """Return model place slots using HKJC local-race declared-starter terms.
+
+    HKJC pays two places for 4-6 declared starters and three for 7 or more.
+    Below four, one slot is a model-only fallback, not an official Place pool.
+    """
+    if declared_starters >= 7:
         return 3
     if declared_starters >= 4:
         return 2
