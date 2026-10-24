@@ -35,7 +35,7 @@ gain["delta"], gain["ci95"]              # Δf² 同 95% bootstrap 區間
 - 每個賽事 row 必須有 `runner_count`（`evaluate_race` 已加），因為 null model 的 log loss 係 `log(出賽馬數)`。
 - 推廣 gate 預設只**報告** Δf²；加 `--require-information-gain` 才會把 `Δf² > 0` 變成一條硬性條件（保持舊行為）。
 
-> 注意：Δf² 係相對市場的資訊優勢，唔等於 ROI。要賺錢仍然要過抽水（香港 Win/Place/Q/QP 17.5%）。
+> 注意：Δf² 係相對市場的資訊優勢，唔等於 ROI。要賺錢仍然要過抽水 — 各池抽水唔同：WIN 池 17.5%（PR #13 拍板）；place/QIN/QPL 待 T-60 實測核實官方 takeout 表（issue #22），唔可以套用 WIN 數字。
 
 ## 機率校準層（isotonic / Platt）
 
