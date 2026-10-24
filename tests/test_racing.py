@@ -15,6 +15,7 @@ sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "predict-hk-racing" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
+from domain import derive_place_slots, quote_supported  # noqa: E402
 from racing_model import (  # noqa: E402
     assess_intent,
     expected_calibration_error,
@@ -435,6 +436,132 @@ class PipelineIntegrationTests(unittest.TestCase):
         bad_time_path = self.base / "cards" / "bad-time.json"
         self.dump(bad_time_path, bad_time)
         self.run_cli("import-card", "--db", self.db, "--file", bad_time_path, ok=False)
+
+    def v11_card(self, card: dict) -> dict:
+        """Turn a 1.0 fixture card into a 1.1 card with quotes and an excerpt."""
+        card = json.loads(json.dumps(card))
+        card["schema_version"] = "1.1"
+        card["race"]["declared_starters"] = len(card["runners"])
+        card["race"].pop("place_slots", None)
+        card["sources"][0]["url"] = "https://example.invalid/synthetic"
+        card["sources"][0]["excerpt"] = "練馬師表示，今仗以爭勝為目標，並會交由主帥策騎。"
+        for runner in card["runners"]:
+            for item in runner["intent_evidence"]:
+                item["quote"] = "今仗以爭勝為目標"
+        return card
+
+    def test_unknown_feature_is_rejected_unless_opted_in(self):
+        card, _ = self.make_card("2026-10-01")
+        card["runners"][0]["features"]["won_last_start"] = 1
+        path = self.base / "cards" / "unknown.json"
+        self.dump(path, card)
+        rejected = self.run_cli("import-card", "--db", self.db, "--file", path, ok=False)
+        self.assertIn("Unregistered feature", rejected.stderr)
+        accepted = self.run_cli(
+            "import-card", "--db", self.db, "--file", path, "--allow-unknown-features"
+        )
+        self.assertFalse(json.loads(accepted.stdout)["duplicate"])
+
+    def test_schema_1_1_requires_quote_that_matches_excerpt(self):
+        base_card, _ = self.make_card("2026-10-02")
+        good = self.v11_card(base_card)
+
+        missing = json.loads(json.dumps(good))
+        missing["runners"][1]["intent_evidence"][0].pop("quote")
+        missing_path = self.base / "cards" / "missing-quote.json"
+        self.dump(missing_path, missing)
+        rejected = self.run_cli("import-card", "--db", self.db, "--file", missing_path, ok=False)
+        self.assertIn("verbatim quote", rejected.stderr)
+
+        mismatch = json.loads(json.dumps(good))
+        mismatch["runners"][1]["intent_evidence"][0]["quote"] = "完全無關嘅一句說話"
+        mismatch_path = self.base / "cards" / "mismatch-quote.json"
+        self.dump(mismatch_path, mismatch)
+        rejected = self.run_cli("import-card", "--db", self.db, "--file", mismatch_path, ok=False)
+        self.assertIn("not found in the excerpt", rejected.stderr)
+
+        good_path = self.base / "cards" / "good-quote.json"
+        self.dump(good_path, good)
+        accepted = self.run_cli("import-card", "--db", self.db, "--file", good_path)
+        self.assertFalse(json.loads(accepted.stdout)["duplicate"])
+
+    def test_evaluate_scores_pre_race_predictions_only(self):
+        card, _ = self.make_card("2026-01-05")
+        card_path = self.base / "cards" / "recon.json"
+        self.dump(card_path, card)
+        self.run_cli("import-card", "--db", self.db, "--file", card_path)
+        # A reconstruction created after the race must not enter the KPI.
+        self.run_cli(
+            "predict", "--db", self.db, "--race-id", card["race"]["race_id"], "--historical"
+        )
+        order = [runner["horse_no"] for runner in card["runners"]]
+        result = {
+            "schema_version": "1.0",
+            "race_id": card["race"]["race_id"],
+            "recorded_at": "2026-01-05T14:00:00+08:00",
+            "sources": [{"source_id": "R1", "title": "虛構測試賽果"}],
+            "results": [
+                {"horse_no": number, "finish_position": position, "status": "OK"}
+                for position, number in enumerate(order, start=1)
+            ],
+        }
+        result_path = self.base / "results" / "recon.json"
+        self.dump(result_path, result)
+        self.run_cli("import-result", "--db", self.db, "--file", result_path)
+
+        report = json.loads(self.run_cli("evaluate", "--db", self.db).stdout)
+        self.assertEqual(report["excluded_by_forecast_kind"], {"historical-reconstruction": 1})
+        self.assertEqual(report["models"], {})
+
+        legacy = json.loads(
+            self.run_cli("evaluate", "--db", self.db, "--all-kinds").stdout
+        )
+        self.assertEqual(legacy["models"]["market-baseline"]["race_count"], 1)
+
+    def test_place_slots_follow_declared_field_size(self):
+        card, _ = self.make_card("2026-10-03")
+        card["race"]["declared_starters"] = 5
+        card["race"].pop("place_slots", None)
+        card_path = self.base / "cards" / "small-field.json"
+        self.dump(card_path, card)
+        imported = json.loads(
+            self.run_cli("import-card", "--db", self.db, "--file", card_path).stdout
+        )
+        self.assertFalse(any("place_slots" in w for w in imported["warnings"]))
+        prediction = json.loads(
+            self.run_cli(
+                "predict", "--db", self.db, "--race-id", card["race"]["race_id"]
+            ).stdout
+        )
+        self.assertEqual(prediction["place_slots"], 2)
+        self.assertAlmostEqual(
+            sum(item["place_probability"] for item in prediction["runners"]), 2.0
+        )
+
+        mismatched, _ = self.make_card("2026-10-04")
+        mismatched["race"]["declared_starters"] = 5
+        mismatch_path = self.base / "cards" / "slot-mismatch.json"
+        self.dump(mismatch_path, mismatched)
+        warnings = json.loads(
+            self.run_cli("import-card", "--db", self.db, "--file", mismatch_path).stdout
+        )["warnings"]
+        self.assertTrue(any("place_slots=3" in warning for warning in warnings))
+
+
+class DomainRuleTests(unittest.TestCase):
+    def test_place_slots_follow_hkjc_terms(self):
+        self.assertEqual(derive_place_slots(14), 3)
+        self.assertEqual(derive_place_slots(8), 3)
+        self.assertEqual(derive_place_slots(7), 2)
+        self.assertEqual(derive_place_slots(4), 2)
+        self.assertEqual(derive_place_slots(3), 1)
+
+    def test_quote_matching_folds_width_and_punctuation(self):
+        excerpt = "練馬師表示，今仗以爭勝為目標！"
+        self.assertTrue(quote_supported("今仗以爭勝為目標", excerpt))
+        self.assertTrue(quote_supported("練馬師表示 今仗以爭勝為目標", excerpt))
+        self.assertFalse(quote_supported("今仗只係熱身", excerpt))
+        self.assertFalse(quote_supported("爭勝", excerpt))
 
 
 if __name__ == "__main__":

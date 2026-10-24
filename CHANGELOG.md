@@ -2,6 +2,26 @@
 
 所有重要變更會記錄喺呢度。版本採用 Semantic Versioning，日期採用 ISO 格式。
 
+## [Unreleased] - 2026-10-24
+
+### Added
+
+- Race card `schema_version: "1.1"`：意圖證據要有逐字 `quote`，來源要有 `url`，可選 `excerpt`；`quote` 對唔上 `excerpt` 會被拒。
+- `scripts/domain.py` 特徵註冊表（`FEATURE_REGISTRY`）：未註冊特徵一律拒絕，杜絕改名賽後特徵漏入模型。
+- `fit --min-feature-coverage`：特徵覆蓋率太低（預設 < 0.5）會拒絕訓練。
+- 模型版本會保存 `feature_definitions` 快照，方便日後解讀舊模型。
+- `race.declared_starters` 同自動 `place_slots` 推導（8 匹或以上 3 位、4-7 匹 2 位）。
+- `evaluate --kinds` / `--all-kinds`：預設只計 `pre-race` 預測。
+
+### Changed
+
+- **BREAKING** `evaluate` 預設唔再計入 `historical-reconstruction` 預測，報告新增 `scored_forecast_kinds` 同 `excluded_by_forecast_kind`。舊行為可用 `--all-kinds` 還原。
+- `place_slots` 可以省略，程式會按 declared starters 自動推導；與 field size 不符只會出 warning。
+
+### Migrated
+
+- 舊 `schema_version: "1.0"` 卡仍然接受，但會提示補 `quote`。建議新卡一律用 `1.1`。
+
 ## [0.2.0] - 2026-10-24
 
 ### Added

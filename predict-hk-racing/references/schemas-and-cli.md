@@ -41,9 +41,10 @@ racing-data/
     "race_no": 1,
     "off_time": "2026-10-25T13:00:00+08:00",
     "distance_m": 1200,
+    "declared_starters": 12,
     "place_slots": 3
   },
-  "sources": [{"source_id": "S1", "title": "官方排位表", "url": "..."}],
+  "sources": [{"source_id": "S1", "title": "官方排位表", "url": "...", "excerpt": "原文節錄"}],
   "runners": []
 }
 ```
@@ -64,11 +65,16 @@ racing-data/
   "strength": 0.3,
   "confidence": 0.7,
   "source_id": "S1",
-  "note": "逐字或忠實摘錄可觀察事實，並註明限制"
+  "quote": "是日配備改動：加戴眼罩",
+  "note": "觀察事實加限制；推論同事實要分開寫"
 }
 ```
 
 `direction` 可用 `positive`、`negative`、`neutral` 或 1、−1、0。`strength` 係訊號強度，`confidence` 係來源及觀察可靠度，兩者都係 0–1。`source_id` 必須存在於 `sources`。
+
+Schema 1.1 起，每項證據亦要 `quote`：逐字摘錄來源原文（正規化後至少 8 字）。如果 `source` 有 `excerpt`，`quote` 必須真係出現喺節錄之內，否則 `import-card` 會拒絕。`excerpt` 同 `quote` 係防幻覺嘅核心，唔好自己改寫。
+
+`features` 只准用 `scripts/domain.py` 註冊表入面嘅名稱；未註冊特徵會被拒絕（真要例外就用 `--allow-unknown-features`，等於自己承擔滲漏風險）。
 
 ## Result
 
@@ -115,6 +121,8 @@ python "<SKILL>/scripts/racing_lab.py" import-result --db "racing-data/racing.db
 python "<SKILL>/scripts/racing_lab.py" evaluate --db "racing-data/racing.db" --output "racing-data/evaluations/latest.json"
 ```
 
+`evaluate` 預設只計 `pre-race` 預測，報告會列出 `scored_forecast_kinds` 同 `excluded_by_forecast_kind`。要覆盤歷史重建，用 `--kinds historical-reconstruction` 分開出報告；`--all-kinds` 只作 legacy 用途，唔建議用嚟計 KPI。
+
 訓練新候選版本：
 
 ```bash
@@ -124,6 +132,7 @@ python "<SKILL>/scripts/racing_lab.py" fit \
   --features "market_logp,intent_centered,rating,draw,weight_lb,cd_place_rate,recent_finish_mean,days_since_run" \
   --train-before "2026-10-24" \
   --min-races 30 \
+  --min-feature-coverage 0.5 \
   --output "racing-data/models/candidate-2026-10-24.json"
 ```
 
@@ -142,6 +151,12 @@ python "<SKILL>/scripts/racing_lab.py" promote --db "racing-data/racing.db" --mo
 ```
 
 `promote` 唔允許人手跳過門檻；未合資格會寫 `rejected`。做意圖 ablation 時，用另一個新版本名稱及完全相同的訓練／測試窗口，只移除 `intent_centered`。
+
+## 位置名額與特徵註冊
+
+`place_slots` 可以省略：程式會用 `declared_starters`（冇填就用 active runners）按馬會規則推導——8 匹或以上 3 位、4-7 匹 2 位、其餘 1 位。若果你寫死一個同 field size 唔相符嘅值，`import-card` 會出 warning 並照用你嘅值（例如有馬退出但 declared starters 未變）。
+
+特徵註冊表喺 `scripts/domain.py`：每個特徵要寫低單位、來源同定義。加新特徵就喺 `SPECS` 加一項，順手喺 `references/modeling-and-backtesting.md` 講清楚點樣保證佢喺 `data_cutoff` 前已存在。
 
 ## 模型與紀錄
 
