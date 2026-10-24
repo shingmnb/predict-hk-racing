@@ -714,6 +714,11 @@ class PipelineIntegrationTests(unittest.TestCase):
         self.assertEqual(promotion["event"], "rejected")
         self.assertTrue(promotion["promotion_gate"]["block_ablation_missing"])
         self.assertGreaterEqual(promotion["promotion_gate"]["candidates_backtested"], 1)
+        bypass = self.run_cli(
+            "promote", "--db", self.db, "--model-version", "abl-v2",
+            "--allow-missing-ablation", ok=False,
+        )
+        self.assertIn("unrecognized arguments", bypass.stderr)
 
 
 class DomainRuleTests(unittest.TestCase):
@@ -743,6 +748,10 @@ class DecisionUnitTests(unittest.TestCase):
     def test_payout_odds_uses_hk_dividend(self):
         self.assertAlmostEqual(payout_odds(42.5, 3.1), 4.25)
         self.assertAlmostEqual(payout_odds(None, 3.1), 3.1)
+
+    def test_coverage_slices_handles_empty_input(self):
+        from decision import coverage_slices
+        self.assertEqual(coverage_slices([], [50]), [])
 
 
 if __name__ == "__main__":

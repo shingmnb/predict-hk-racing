@@ -122,8 +122,8 @@ def settle_stream(
         "strike_rate": round(wins / len(bets), 6) if bets else None,
         "max_drawdown": round(max_drawdown, 6),
         "policy": (
-            "Kelly under HK takeout loses on average; positive ROI here needs evidence, "
-            "not intent. Dividends are settled per HK$10 when present."
+            "Stakes use frozen probabilities and taken odds; ROI is an empirical result, "
+            "not a guarantee. Dividends are settled per HK$10 when present."
         ),
         "detail": bets[:200],
     }
@@ -135,6 +135,8 @@ def coverage_slices(points: list[tuple[float, dict]], percentages: list[int]) ->
     ``points`` is a list of ``(confidence, metric_row)``; higher confidence first.
     """
     ordered = sorted(points, key=lambda item: item[0], reverse=True)
+    if not ordered:
+        return []
     total = len(ordered)
     out: list[dict] = []
     for pct in percentages:

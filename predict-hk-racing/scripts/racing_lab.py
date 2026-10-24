@@ -755,6 +755,10 @@ def command_backtest(args) -> dict:
             information_gain["ci95"][0] is not None and information_gain["ci95"][0] > 0
         )
         require_information_gain = bool(getattr(args, "require_information_gain", False))
+        block_ablation_required = bool(template.get("feature_blocks"))
+        block_ablation_recorded = bool(
+            ablation and "candidate_minus_without_block" in ablation
+        )
         gate = {
             "min_test_races_required": args.min_test_races,
             "enough_test_races": enough,
@@ -765,7 +769,8 @@ def command_backtest(args) -> dict:
             "information_gain_required": require_information_gain,
             "information_gain_positive": information_gain_positive,
             "information_gain_ci95_excludes_zero": information_gain_significant,
-            "block_ablation_recorded": ablation is not None,
+            "block_ablation_required": block_ablation_required,
+            "block_ablation_recorded": block_ablation_recorded,
             "eligible": (
                 enough
                 and beats_baseline
@@ -773,6 +778,7 @@ def command_backtest(args) -> dict:
                 and significant
                 and beats_champion
                 and (information_gain_positive if require_information_gain else True)
+                and (block_ablation_recorded if block_ablation_required else True)
             ),
         }
         report = {
@@ -829,8 +835,8 @@ def command_promote(args) -> dict:
         gate["multiple_comparison_note"] = (
             "每次新候選都是一次檢定；候選越多，單一 CI 的假陽性風險越高。"
         )
-        ablation_required = bool(model.get("feature_blocks")) and not gate.get("block_ablation_recorded")
-        if ablation_required and not args.allow_missing_ablation:
+        ablation_missing = bool(model.get("feature_blocks")) and not gate.get("block_ablation_recorded")
+        if ablation_missing:
             gate["eligible"] = False
             gate["block_ablation_missing"] = True
         event_type = "promoted" if gate["eligible"] else "rejected"
@@ -994,10 +1000,6 @@ def build_parser() -> argparse.ArgumentParser:
     promote = sub.add_parser("promote", help="Promote only an eligible model; otherwise record rejection")
     promote.add_argument("--db", required=True)
     promote.add_argument("--model-version", required=True)
-    promote.add_argument(
-        "--allow-missing-ablation", action="store_true",
-        help="Promote even when the model declares feature blocks but no block ablation was recorded",
-    )
     return parser
 
 
