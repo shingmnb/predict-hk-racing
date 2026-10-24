@@ -150,7 +150,7 @@ python "<SKILL>/scripts/racing_lab.py" backtest \
 python "<SKILL>/scripts/racing_lab.py" promote --db "racing-data/racing.db" --model-version "candidate-2026-10-24"
 ```
 
-`promote` 唔允許人手跳過門檻；未合資格會寫 `rejected`。做 ablation 唔需要另開版本：`fit` 用 `--block name=feature,feature` 宣告特徵塊，`backtest --ablate name` 會在同一測試窗口重跑一次（移除該塊）並出 paired bootstrap。若模型宣告了 block 但 backtest 冇完整配對 ablation，`promote` 會拒絕，唔提供人手覆寫。報告同時列 `candidates_backtested`，提醒多重比較風險。
+`promote` 唔允許人手跳過門檻；未合資格會寫 `rejected`。做 ablation 唔需要另開版本：`fit` 用 `--block name=feature,feature` 宣告特徵塊，`backtest --ablate name` 會在同一測試窗口重跑一次（移除該塊）並出 paired bootstrap。若模型宣告了 block 但 backtest 冇完整配對 ablation，`promote` 會拒絕，唔提供人手覆寫。報告列 `candidates_backtested`／`candidates_in_family`，promote 強制以 Bonferroni `effective_alpha = 0.05/n` 計調整後 CI 入閘（唔再只係提醒）；候選家族改變會標 `multiple_comparison_stale`，要先重跑 backtest 先可以再 promote。
 
 ## 價值與選擇性使用
 
