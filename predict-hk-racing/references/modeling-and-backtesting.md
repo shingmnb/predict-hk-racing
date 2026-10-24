@@ -17,6 +17,23 @@
 
 未夠歷史樣本時，輸出市場基準、意圖證據及定性形勢，明確標示「未有已驗證模型優勢」。唔好用自創權重假裝精準 AI 概率。
 
+## De-vig 方法與 Q/PQ 聯合機率
+
+`market_probabilities(runners, method=...)` 支援兩種去水方法：
+
+- `normalized`（預設，向後兼容）：`p_i = (1/o_i) / Σ(1/o_j)`，將水位按比例攤分。
+- `shin`（Shin 1993）：假設書商面對部分內幕交易者，解出令全場機率和為 1 的內幕比例 `z`。比例攤分會**高估冷門、低估大熱**（favourite–longshot bias）；Shin 會把機率**移向大熱**。實測（odds 1.8 / 3.5 / 7.0 / 10.0）大熱由 51.2% 升至 52.7%，最冷由 9.2% 降至 8.6%。
+
+> 兩者都只係「去水」而唔係「校準」；輸出概率仍然要經賽後 Brier／校準檢查。
+
+`pair_probabilities(win_probs, slots=2|3)` 用同一組 Plackett–Luce 效用計**成對聯合機率**，供連贏（`slots=2`）同位置Q（`slots=3`）使用：
+
+- 連贏：`P(i,j) = p_i p_j/(1-p_i) + p_j p_i/(1-p_j)`
+- 位置Q：對所有第三匹 `k`，加總 `{i,j,k}` 六個排列的 PL 機率
+- 不變量（已寫入測試）：連贏全對機率和 = 1；位置Q `Σ_j P(i,j) = 2 × P(i 入三甲)`
+
+留意：Q/PQ 聯合機率仍然係 PL 近似，未計步速互動、檔位碰撞等相關性；落注前要對實時彩池賠率。
+
 ## 特徵與防滲漏
 
 可用例子：`market_logp`、`intent_centered`、`rating`、`draw`、`weight_lb`、`career_place_rate`、`cd_place_rate`、`recent_finish_mean`、`days_since_run`。原始數值先交模型學方向；唔好因常識預設「輕磅一定好」或「外檔一定差」。

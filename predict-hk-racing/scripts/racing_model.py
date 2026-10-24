@@ -81,7 +81,54 @@ def assess_intent(runner: dict) -> dict:
     }
 
 
-def market_probabilities(runners: list[dict]) -> tuple[dict[int, float], bool, float | None]:
+def shin_probabilities(inverse_odds: list[float]) -> list[float]:
+    """Shin (1993) de-vigging for a complete win book.
+
+    Simple normalisation (``p_i = (1/o_i) / Σ(1/o_j)``) spreads the overround
+    proportionally and therefore inherits the favourite–longshot bias: it
+    over-states longshots and under-states favourites. Shin models the book as
+    ``π_i = (1 - z) p_i + z p_i² / Σp`` where ``z`` is the insider share, and
+    solves for the ``z`` that makes the probabilities sum to one.
+
+    ``inverse_odds`` are raw ``1 / decimal_odds`` values (overround > 1).
+    """
+    book = sum(inverse_odds)
+    if book <= 0:
+        raise ValueError("inverse odds must be positive")
+    if book <= 1.0:
+        return [x / book for x in inverse_odds]
+
+    def probs(z: float) -> list[float]:
+        denom = 2.0 * (1.0 - z)
+        return [
+            (math.sqrt(z * z + 4.0 * (1.0 - z) * (x * x) / book) - z) / denom
+            for x in inverse_odds
+        ]
+
+    low, high = 0.0, 0.999999  # Σp decreases monotonically from √book to Σπ²/book
+    for _ in range(100):
+        mid = (low + high) / 2.0
+        if sum(probs(mid)) > 1.0:
+            low = mid
+        else:
+            high = mid
+    result = probs((low + high) / 2.0)
+    total = sum(result)
+    return [x / total for x in result]
+
+
+def market_probabilities(
+    runners: list[dict], method: str = "normalized"
+) -> tuple[dict[int, float], bool, float | None]:
+    """De-vigged win probabilities.
+
+    ``method``: ``normalized`` (default, backward compatible) or ``shin``
+    (favourite–longshot aware). Both return probabilities summing to 1 when the
+    book is complete; an incomplete book still falls back to uniform with a
+    ``False`` flag so callers can downgrade the run.
+    """
+    if method not in {"normalized", "shin"}:
+        raise ValueError(f"unknown de-vig method: {method}")
     if not runners:
         return {}, False, None
     complete = all(
@@ -92,9 +139,14 @@ def market_probabilities(runners: list[dict]) -> tuple[dict[int, float], bool, f
         for r in runners
     )
     if complete:
-        inverse = {runner_key(r): 1.0 / float(r["win_odds"]) for r in runners}
-        book_sum = sum(inverse.values())
-        return {k: v / book_sum for k, v in inverse.items()}, True, book_sum - 1.0
+        keys = [runner_key(r) for r in runners]
+        inverse = [1.0 / float(r["win_odds"]) for r in runners]
+        book_sum = sum(inverse)
+        if method == "shin":
+            adjusted = shin_probabilities(inverse)
+        else:
+            adjusted = [x / book_sum for x in inverse]
+        return dict(zip(keys, adjusted)), True, book_sum - 1.0
     uniform = 1.0 / len(runners)
     return {runner_key(r): uniform for r in runners}, False, None
 
@@ -152,6 +204,53 @@ def place_probabilities(win_probs: list[float], slots: int) -> list[float]:
                 )
         result[i] += third
     return [min(1.0, x) for x in result]
+
+
+def pair_probabilities(win_probs: list[float], slots: int = 3) -> dict[tuple[int, int], float]:
+    """Joint inclusion probabilities for quinella / Place-Quinella tickets.
+
+    Returns ``{(i, j): P(i and j both finish inside the top ``slots``)}`` for
+    ``i < j``, using the same Plackett–Luce approximation as
+    :func:`place_probabilities`.
+
+    ``slots=2`` is the 連贏 (Quinella) case — the two horses must be the exact
+    top two in either order. ``slots=3`` is 位置Q (Place Quinella).
+    """
+    n = len(win_probs)
+    if slots not in (2, 3):
+        raise ValueError("pair_probabilities supports slots=2 (quinella) or slots=3 (place quinella)")
+    if n < 2:
+        return {}
+    p = [max(EPS, min(1.0 - EPS, x)) for x in win_probs]
+    total = sum(p)
+    p = [x / total for x in p]
+
+    pairs: dict[tuple[int, int], float] = {}
+    if slots == 2:
+        for i in range(n):
+            for j in range(i + 1, n):
+                p_ij = p[i] * p[j] / max(EPS, 1.0 - p[i])
+                p_ji = p[j] * p[i] / max(EPS, 1.0 - p[j])
+                pairs[(i, j)] = min(1.0, p_ij + p_ji)
+        return pairs
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            joint = 0.0
+            for k in range(n):
+                if k == i or k == j:
+                    continue
+                for first, second, third in (
+                    (i, j, k), (i, k, j), (j, i, k),
+                    (j, k, i), (k, i, j), (k, j, i),
+                ):
+                    joint += (
+                        p[first]
+                        * p[second] / max(EPS, 1.0 - p[first])
+                        * p[third] / max(EPS, 1.0 - p[first] - p[second])
+                    )
+            pairs[(i, j)] = min(1.0, joint)
+    return pairs
 
 
 def _raw_value(runner: dict, name: str, base_p: float, market_complete: bool):
