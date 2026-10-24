@@ -736,6 +736,16 @@ def pseudo_r2(rows: list[dict]) -> float | None:
     return 1.0 - logloss / null_logloss
 
 
+def _bootstrap_resolution_warning(alpha: float, samples: int) -> str:
+    recommended_samples = math.ceil(10 / alpha)
+    return (
+        f"Adjusted bootstrap CI is unresolved at alpha={alpha:.12g} with {samples} samples: "
+        "the lower-tail index floors to 0. "
+        f"Increase --bootstrap (recommended >= {recommended_samples}) or split the candidate "
+        "family before backtesting; no adjusted interval is reported."
+    )
+
+
 def information_gain_vs_market(
     candidate_rows: list[dict],
     market_rows: list[dict],
@@ -748,7 +758,8 @@ def information_gain_vs_market(
 
     Rows must be paired in the same order and, when present, have matching
     ``race_id`` and ``runner_count`` values. ``ci95`` retains the historical
-    unadjusted interval; ``ci`` uses ``alpha`` for the promotion policy.
+    unadjusted interval; ``ci`` uses ``alpha`` for the promotion policy and is
+    suppressed when the bootstrap cannot resolve its lower tail.
     """
     import random
 
@@ -762,6 +773,8 @@ def information_gain_vs_market(
         "ci": [None, None],
         "alpha": alpha,
         "race_count": 0,
+        "ci_resolution_sufficient": False,
+        "ci_warning": "Adjusted bootstrap CI unavailable: paired race data are missing or misaligned.",
     }
     if not candidate_rows or len(candidate_rows) != len(market_rows):
         return empty
@@ -782,6 +795,8 @@ def information_gain_vs_market(
     if len(pairs) == 1 or samples <= 0:
         ci95 = [None, None]
         ci = [None, None]
+        ci_resolution_sufficient = False
+        ci_warning = "Adjusted bootstrap CI unavailable: need paired races and positive --bootstrap."
     else:
         rng = random.Random(seed)
         n = len(pairs)
@@ -792,11 +807,21 @@ def information_gain_vs_market(
             resampled_market = [pairs[index][1] for index in indices]
             estimates.append(pseudo_r2(resampled_candidate) - pseudo_r2(resampled_market))
         estimates.sort()
-        ci95 = [estimates[int(0.025 * samples)], estimates[max(0, int(0.975 * samples) - 1)]]
-        ci = [
-            estimates[int((alpha / 2) * samples)],
-            estimates[max(0, int((1 - alpha / 2) * samples) - 1)],
+        ci95 = [
+            estimates[int(0.025 * samples)],
+            estimates[max(0, math.ceil(0.975 * samples) - 1)],
         ]
+        lower_index = int((alpha / 2) * samples)
+        ci_resolution_sufficient = lower_index >= 1
+        if ci_resolution_sufficient:
+            ci = [
+                estimates[lower_index],
+                estimates[max(0, math.ceil((1 - alpha / 2) * samples) - 1)],
+            ]
+            ci_warning = None
+        else:
+            ci = [None, None]
+            ci_warning = _bootstrap_resolution_warning(alpha, samples)
 
     return {
         "candidate_pseudo_r2": candidate_f2,
@@ -806,6 +831,8 @@ def information_gain_vs_market(
         "ci": ci,
         "alpha": alpha,
         "race_count": len(pairs),
+        "ci_resolution_sufficient": ci_resolution_sufficient,
+        "ci_warning": ci_warning,
     }
 
 
@@ -849,14 +876,22 @@ def bootstrap_logloss_difference(
 ) -> dict:
     """Percentile bootstrap for candidate minus baseline log loss.
 
-    ``ci95`` retains the historical unadjusted interval; ``ci`` uses ``alpha``.
+    ``ci95`` retains the historical unadjusted interval; ``ci`` uses ``alpha``
+    and is suppressed when the bootstrap cannot resolve its lower tail.
     """
     import random
 
     if not 0 < alpha < 1:
         raise ValueError("alpha must be between 0 and 1")
     if not candidate_rows or len(candidate_rows) != len(baseline_rows):
-        return {"difference": None, "ci95": [None, None], "ci": [None, None], "alpha": alpha}
+        return {
+            "difference": None,
+            "ci95": [None, None],
+            "ci": [None, None],
+            "alpha": alpha,
+            "ci_resolution_sufficient": False,
+            "ci_warning": "Adjusted bootstrap CI unavailable: paired race data are missing.",
+        }
     differences = [c["logloss"] - b["logloss"] for c, b in zip(candidate_rows, baseline_rows)]
     observed = mean(differences)
     if len(differences) == 1 or samples <= 0:
@@ -865,6 +900,8 @@ def bootstrap_logloss_difference(
             "ci95": [None, None],
             "ci": [None, None],
             "alpha": alpha,
+            "ci_resolution_sufficient": False,
+            "ci_warning": "Adjusted bootstrap CI unavailable: need paired races and positive --bootstrap.",
         }
     rng = random.Random(seed)
     estimates = []
@@ -872,18 +909,28 @@ def bootstrap_logloss_difference(
     for _ in range(samples):
         estimates.append(mean(differences[rng.randrange(n)] for _ in range(n)))
     estimates.sort()
+    last_index = len(estimates) - 1
     ci95 = [
-        estimates[int(0.025 * (len(estimates) - 1))],
-        estimates[int(0.975 * (len(estimates) - 1))],
+        estimates[int(0.025 * last_index)],
+        estimates[math.ceil(0.975 * last_index)],
     ]
-    ci = [
-        estimates[int((alpha / 2) * (len(estimates) - 1))],
-        estimates[int((1 - alpha / 2) * (len(estimates) - 1))],
-    ]
+    lower_index = int((alpha / 2) * last_index)
+    ci_resolution_sufficient = lower_index >= 1
+    if ci_resolution_sufficient:
+        ci = [
+            estimates[lower_index],
+            estimates[min(last_index, math.ceil((1 - alpha / 2) * last_index))],
+        ]
+        ci_warning = None
+    else:
+        ci = [None, None]
+        ci_warning = _bootstrap_resolution_warning(alpha, samples)
     return {
         "difference": observed,
         "ci95": ci95,
         "ci": ci,
         "alpha": alpha,
+        "ci_resolution_sufficient": ci_resolution_sufficient,
+        "ci_warning": ci_warning,
         "interpretation": "負數代表候選模型 log loss 較低；區間跨 0 即改善未明朗。",
     }
