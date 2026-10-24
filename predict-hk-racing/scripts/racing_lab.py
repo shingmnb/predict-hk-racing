@@ -25,6 +25,11 @@ from domain import (  # noqa: E402
     registered as feature_registered,
     describe as describe_features,
 )
+from decision import (  # noqa: E402
+    coverage_slices,
+    kelly_fraction,
+    settle_stream,
+)
 from racing_model import (  # noqa: E402
     bootstrap_logloss_difference,
     information_gain_vs_market,
@@ -388,6 +393,21 @@ def latest_promoted(db: sqlite3.Connection) -> str | None:
     return row["model_version"] if row else None
 
 
+def parse_blocks(entries: list[str] | None) -> dict[str, list[str]]:
+    """Parse repeatable ``name=feat1,feat2`` arguments into feature blocks."""
+    blocks: dict[str, list[str]] = {}
+    for entry in entries or []:
+        name, _, raw = entry.partition("=")
+        name = name.strip()
+        features = [item.strip() for item in raw.split(",") if item.strip()]
+        if not name or not features:
+            raise ValueError(f"Feature block must look like name=feature,feature: {entry}")
+        if name in blocks:
+            raise ValueError(f"Duplicate feature block: {name}")
+        blocks[name] = features
+    return blocks
+
+
 def stripped_row(row: dict) -> dict:
     return {key: value for key, value in row.items() if key != "calibration"}
 
@@ -506,16 +526,31 @@ def command_evaluate(args) -> dict:
             metrics = metric_row(card, result, prediction)
             if not metrics:
                 continue
-            groups.setdefault(version, {"rows": [], "run_ids": [], "race_ids": []})
+            top_probability = max(
+                (float(item["win_probability"]) for item in prediction["runners"]), default=0.0
+            )
+            groups.setdefault(
+                version, {"rows": [], "run_ids": [], "race_ids": [], "confidence": []}
+            )
             groups[version]["rows"].append(metrics)
             groups[version]["run_ids"].append(row["run_id"])
             groups[version]["race_ids"].append(race_id)
+            groups[version]["confidence"].append((top_probability, metrics))
+        coverages = [
+            int(item)
+            for item in (args.coverage or "").replace(" ", "").split(",")
+            if item
+        ]
         report_groups = {}
         for version, group in groups.items():
             report_groups[version] = summarize_rows(group["rows"])
             report_groups[version]["race_ids"] = group["race_ids"]
             report_groups[version]["prediction_run_ids"] = group["run_ids"]
             report_groups[version]["per_race"] = [stripped_row(row) for row in group["rows"]]
+            if coverages:
+                report_groups[version]["selective_use"] = coverage_slices(
+                    group["confidence"], coverages
+                )
         report = {
             "kind": "prediction-evaluation-v1",
             "created_at": now_iso(),
@@ -567,6 +602,12 @@ def command_fit(args) -> dict:
                 f"Features below {args.min_feature_coverage:.2f} coverage: " + ", ".join(thin)
             )
         model["feature_definitions"] = describe_features(features)
+        blocks = parse_blocks(args.block)
+        if blocks:
+            unknown = sorted({name for block in blocks.values() for name in block} - set(features))
+            if unknown:
+                raise ValueError(f"Blocks reference features that are not trained: {', '.join(unknown)}")
+            model["feature_blocks"] = blocks
         model.update({"model_version": args.model_version, "created_at": now_iso(), "train_before": args.train_before})
         db.execute(
             "INSERT INTO models VALUES (?, ?, ?, ?)",
@@ -580,16 +621,26 @@ def command_fit(args) -> dict:
     return model
 
 
-def walk_forward(records: list[dict], template: dict, test_indices: list[int], refit_every: int) -> list[dict]:
-    rows = []
+def walk_forward_predictions(records: list[dict], template: dict | None, test_indices: list[int], refit_every: int):
+    """Yield (record, prediction) pairs under an expanding window."""
     cached = None
     next_refit = -1
     for index in test_indices:
-        if cached is None or index >= next_refit:
+        if template is None:
+            cached = None
+        elif cached is None or index >= next_refit:
             cached = fit_model(records[:index], template["features"], **template["hyperparameters"])
             next_refit = index + refit_every
         record = records[index]
-        prediction = predict_card(record["card"], cached, template.get("model_version", "candidate"))
+        prediction = predict_card(
+            record["card"], cached, (template or {}).get("model_version", "market-baseline")
+        )
+        yield record, prediction
+
+
+def walk_forward(records: list[dict], template: dict, test_indices: list[int], refit_every: int) -> list[dict]:
+    rows = []
+    for record, prediction in walk_forward_predictions(records, template, test_indices, refit_every):
         metrics = metric_row(record["card"], record["result"], prediction)
         if metrics:
             rows.append(metrics)
@@ -644,6 +695,41 @@ def command_backtest(args) -> dict:
             else:
                 champion_summary = summarize_rows(champion_rows)
 
+        ablation = None
+        if args.ablate:
+            blocks = template.get("feature_blocks", {})
+            if args.ablate not in blocks:
+                raise ValueError(
+                    f"Unknown feature block: {args.ablate}. Declare it with fit --block {args.ablate}=..."
+                )
+            removed = blocks[args.ablate]
+            ablated = dict(template)
+            ablated["features"] = [name for name in template["features"] if name not in removed]
+            if not ablated["features"]:
+                raise ValueError("Ablation would leave no features")
+            ablated_rows = walk_forward(records, ablated, test_indices, args.refit_every)
+            by_race = {row["race_id"]: row for row in ablated_rows}
+            aligned = [by_race[row["race_id"]] for row in candidate_rows if row["race_id"] in by_race]
+            if len(aligned) == len(candidate_rows):
+                ablation = {
+                    "block": args.ablate,
+                    "features_removed": removed,
+                    "without_block": summarize_rows(aligned),
+                    "candidate_minus_without_block": bootstrap_logloss_difference(
+                        candidate_rows, aligned, samples=args.bootstrap
+                    ),
+                    "interpretation": (
+                        "負數代表保留該 block 較好；區間跨 0 即該 block 未證明有時間外價值。"
+                    ),
+                }
+            else:
+                ablation = {
+                    "block": args.ablate,
+                    "features_removed": removed,
+                    "without_block": summarize_rows(ablated_rows),
+                    "note": "Race alignment incomplete; comparison not computed.",
+                }
+
         enough = len(candidate_rows) >= args.min_test_races
         beats_baseline = (
             candidate_summary.get("logloss", math.inf) < baseline_summary.get("logloss", math.inf)
@@ -679,6 +765,7 @@ def command_backtest(args) -> dict:
             "information_gain_required": require_information_gain,
             "information_gain_positive": information_gain_positive,
             "information_gain_ci95_excludes_zero": information_gain_significant,
+            "block_ablation_recorded": ablation is not None,
             "eligible": (
                 enough
                 and beats_baseline
@@ -707,6 +794,7 @@ def command_backtest(args) -> dict:
             "information_gain_vs_market": information_gain,
             "champion": champion_summary,
             "candidate_minus_champion_logloss": champion_comparison,
+            "ablation": ablation,
             "promotion_gate": gate,
             "per_race": [
                 {"candidate": stripped_row(c), "market_baseline": stripped_row(b)}
@@ -732,7 +820,19 @@ def command_promote(args) -> dict:
         if not row:
             raise ValueError("Run backtest before promotion")
         report = json.loads(row["report_json"])
-        gate = report["promotion_gate"]
+        gate = dict(report["promotion_gate"])
+        model = get_model(db, args.model_version)
+        candidates_tried = db.execute(
+            "SELECT COUNT(DISTINCT model_version) FROM evaluation_runs WHERE kind = 'backtest'"
+        ).fetchone()[0]
+        gate["candidates_backtested"] = candidates_tried
+        gate["multiple_comparison_note"] = (
+            "每次新候選都是一次檢定；候選越多，單一 CI 的假陽性風險越高。"
+        )
+        ablation_required = bool(model.get("feature_blocks")) and not gate.get("block_ablation_recorded")
+        if ablation_required and not args.allow_missing_ablation:
+            gate["eligible"] = False
+            gate["block_ablation_missing"] = True
         event_type = "promoted" if gate["eligible"] else "rejected"
         event_id = "me_" + uuid.uuid4().hex
         db.execute(
@@ -743,6 +843,55 @@ def command_promote(args) -> dict:
             ),
         )
     return {"model_version": args.model_version, "event": event_type, "promotion_gate": gate}
+
+
+def command_value_backtest(args) -> dict:
+    with connect(args.db) as db:
+        if args.model_version in {"baseline", "market-baseline"}:
+            template = None
+        else:
+            template = get_model(db, args.model_version)
+        records = load_records(db)
+        test_indices = []
+        for index, record in enumerate(records):
+            if index < args.min_train_races:
+                continue
+            date = record["card"]["race"]["meeting_date"]
+            if args.test_after and date < args.test_after:
+                continue
+            if args.test_before and date >= args.test_before:
+                continue
+            test_indices.append(index)
+        if not test_indices:
+            raise ValueError("No races in the walk-forward test window")
+        stream = walk_forward_predictions(records, template, test_indices, args.refit_every)
+        settlement = settle_stream(
+            stream,
+            stake_mode=args.stake,
+            cap=args.cap,
+            bankroll=args.bankroll,
+            min_edge=args.min_edge,
+        )
+        report = {
+            "kind": "value-backtest-v1",
+            "created_at": now_iso(),
+            "model_version": args.model_version,
+            "method": {
+                "validation": "expanding-window walk-forward; bets settled with official dividends when present",
+                "min_train_races": args.min_train_races,
+                "refit_every_races": args.refit_every,
+                "test_after": args.test_after,
+                "test_before": args.test_before,
+            },
+            "settlement": settlement,
+        }
+        evaluation_id = "ev_" + uuid.uuid4().hex
+        db.execute(
+            "INSERT INTO evaluation_runs VALUES (?, ?, ?, ?, ?)",
+            (evaluation_id, "value-backtest", args.model_version, report["created_at"], canonical(report)),
+        )
+        report["evaluation_id"] = evaluation_id
+    return report
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -781,6 +930,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--all-kinds", action="store_true",
         help="Score every forecast kind together (legacy behaviour, not recommended)",
     )
+    evaluate.add_argument(
+        "--coverage",
+        help="Comma-separated confidence bands (percent) for selective-use reporting, e.g. 5,10,20,50",
+    )
     evaluate.add_argument("--output")
 
     fit = sub.add_parser("fit", help="Fit a candidate conditional-logit model")
@@ -800,6 +953,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--allow-unknown-features", action="store_true",
         help="Train on feature names missing from scripts/domain.py (turns off the leakage guard)",
     )
+    fit.add_argument(
+        "--block", action="append", default=[], metavar="NAME=FEATURES",
+        help="Declare a named feature block for later ablation, e.g. --block intent=intent_centered",
+    )
     fit.add_argument("--output")
 
     backtest = sub.add_parser("backtest", help="Run expanding-window out-of-sample tests")
@@ -816,11 +973,31 @@ def build_parser() -> argparse.ArgumentParser:
     backtest.add_argument("--test-after", help="Inclusive YYYY-MM-DD")
     backtest.add_argument("--test-before", help="Exclusive YYYY-MM-DD")
     backtest.add_argument("--bootstrap", type=int, default=1000)
+    backtest.add_argument("--ablate", help="Feature block name to drop in a paired ablation run")
     backtest.add_argument("--output")
+
+    value = sub.add_parser(
+        "value-backtest", help="Settle walk-forward bets against official dividends"
+    )
+    value.add_argument("--db", required=True)
+    value.add_argument("--model-version", required=True)
+    value.add_argument("--stake", choices=["flat", "kelly"], default="flat")
+    value.add_argument("--cap", type=float, default=0.01, help="Max share of bankroll per race")
+    value.add_argument("--bankroll", type=float, default=10000.0)
+    value.add_argument("--min-edge", type=float, default=0.0)
+    value.add_argument("--min-train-races", type=int, default=30)
+    value.add_argument("--refit-every", type=int, default=5)
+    value.add_argument("--test-after", help="Inclusive YYYY-MM-DD")
+    value.add_argument("--test-before", help="Exclusive YYYY-MM-DD")
+    value.add_argument("--output")
 
     promote = sub.add_parser("promote", help="Promote only an eligible model; otherwise record rejection")
     promote.add_argument("--db", required=True)
     promote.add_argument("--model-version", required=True)
+    promote.add_argument(
+        "--allow-missing-ablation", action="store_true",
+        help="Promote even when the model declares feature blocks but no block ablation was recorded",
+    )
     return parser
 
 
@@ -849,6 +1026,7 @@ def main() -> int:
             "evaluate": command_evaluate,
             "fit": command_fit,
             "backtest": command_backtest,
+            "value-backtest": command_value_backtest,
             "promote": command_promote,
         }
         result = handlers[args.command](args)

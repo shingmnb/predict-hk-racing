@@ -16,6 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "predict-hk-racing" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 from domain import derive_place_slots, quote_supported  # noqa: E402
+from decision import kelly_fraction, payout_odds  # noqa: E402
 from racing_model import (  # noqa: E402
     assess_intent,
     expected_calibration_error,
@@ -587,6 +588,133 @@ class PipelineIntegrationTests(unittest.TestCase):
         )["warnings"]
         self.assertTrue(any("place_slots=3" in warning for warning in warnings))
 
+    def make_result(self, card, date, winner, dividend=None):
+        remaining = [r["horse_no"] for r in card["runners"] if r["horse_no"] != winner]
+        self.rng.shuffle(remaining)
+        order = [winner] + remaining
+        return {
+            "schema_version": "1.0",
+            "race_id": card["race"]["race_id"],
+            "recorded_at": f"{date}T14:00:00+08:00",
+            "sources": [{"source_id": "R1", "title": "虛構測試賽果"}],
+            "results": [
+                {
+                    "horse_no": number,
+                    "finish_position": position,
+                    "status": "OK",
+                    "win_dividend": dividend if number == winner else None,
+                }
+                for position, number in enumerate(order, start=1)
+            ],
+        }
+
+    def build_history(self, start_day, races, dividends=True):
+        """Import cards + results and return the date range used."""
+        dates = []
+        for index in range(races):
+            date = f"2026-08-{start_day + index:02d}"
+            dates.append(date)
+            card, probabilities = self.make_card(date)
+            card_path = self.base / "cards" / f"v{index}.json"
+            self.dump(card_path, card)
+            self.run_cli("import-card", "--db", self.db, "--file", card_path)
+            winner = self.rng.choices(
+                [r["horse_no"] for r in card["runners"]], weights=probabilities, k=1
+            )[0]
+            odds = next(r["win_odds"] for r in card["runners"] if r["horse_no"] == winner)
+            result = self.make_result(
+                card, date, winner, dividend=round(odds * 10, 2) if dividends else None
+            )
+            result_path = self.base / "results" / f"v{index}.json"
+            self.dump(result_path, result)
+            self.run_cli("import-result", "--db", self.db, "--file", result_path)
+        return dates
+
+    def test_value_backtest_settles_against_dividends(self):
+        self.run_cli("init", "--db", self.db)
+        self.build_history(1, 8)
+        self.run_cli(
+            "fit", "--db", self.db, "--model-version", "value-v1",
+            "--features", "market_logp,rating", "--train-before", "2026-08-08",
+            "--min-races", 6, "--epochs", 60,
+        )
+        settlement = json.loads(
+            self.run_cli(
+                "value-backtest", "--db", self.db, "--model-version", "value-v1",
+                "--stake", "flat", "--cap", 0.02, "--min-edge", -5,
+                "--min-train-races", 4, "--refit-every", 2,
+                "--test-after", "2026-08-05",
+            ).stdout
+        )["settlement"]
+        self.assertGreaterEqual(settlement["bets"], 1)
+        self.assertGreater(settlement["turnover"], 0)
+        self.assertAlmostEqual(
+            settlement["bankroll_end"],
+            settlement["bankroll_start"] + settlement["profit"],
+            places=4,
+        )
+        self.assertIsNotNone(settlement["roi"])
+
+    def test_evaluate_reports_selective_use_bands(self):
+        self.run_cli("init", "--db", self.db)
+        for index in range(4):
+            date = f"2026-09-{index + 1:02d}"
+            card, probabilities = self.make_card(date)
+            card_path = self.base / "cards" / f"s{index}.json"
+            self.dump(card_path, card)
+            self.run_cli("import-card", "--db", self.db, "--file", card_path)
+            self.run_cli("predict", "--db", self.db, "--race-id", card["race"]["race_id"])
+            winner = self.rng.choices(
+                [r["horse_no"] for r in card["runners"]], weights=probabilities, k=1
+            )[0]
+            result_path = self.base / "results" / f"s{index}.json"
+            self.dump(result_path, self.make_result(card, date, winner, dividend=20.0))
+            self.run_cli("import-result", "--db", self.db, "--file", result_path)
+        # These historical fixtures are reconstructions; opt in without weakening the live KPI default.
+        report = json.loads(
+            self.run_cli("evaluate", "--db", self.db, "--all-kinds", "--coverage", "50").stdout
+        )
+        bands = report["models"]["market-baseline"]["selective_use"]
+        self.assertEqual(bands[0]["coverage_pct"], 50)
+        self.assertEqual(bands[0]["race_count"], 2)
+
+    def test_block_ablation_is_recorded_and_gates_promotion(self):
+        self.run_cli("init", "--db", self.db)
+        self.build_history(1, 10)
+        self.run_cli(
+            "fit", "--db", self.db, "--model-version", "abl-v1",
+            "--features", "market_logp,intent_centered,rating",
+            "--block", "intent=intent_centered",
+            "--train-before", "2026-08-08", "--min-races", 6, "--epochs", 40,
+        )
+        with_ablation = json.loads(
+            self.run_cli(
+                "backtest", "--db", self.db, "--model-version", "abl-v1",
+                "--min-train-races", 5, "--min-test-races", 2, "--refit-every", 2,
+                "--test-after", "2026-08-06", "--bootstrap", 50, "--ablate", "intent",
+            ).stdout
+        )
+        self.assertEqual(with_ablation["ablation"]["block"], "intent")
+        self.assertTrue(with_ablation["promotion_gate"]["block_ablation_recorded"])
+
+        self.run_cli(
+            "fit", "--db", self.db, "--model-version", "abl-v2",
+            "--features", "market_logp,intent_centered,rating",
+            "--block", "intent=intent_centered",
+            "--train-before", "2026-08-08", "--min-races", 6, "--epochs", 20,
+        )
+        self.run_cli(
+            "backtest", "--db", self.db, "--model-version", "abl-v2",
+            "--min-train-races", 5, "--min-test-races", 2, "--refit-every", 2,
+            "--test-after", "2026-08-06", "--bootstrap", 50,
+        )
+        promotion = json.loads(
+            self.run_cli("promote", "--db", self.db, "--model-version", "abl-v2").stdout
+        )
+        self.assertEqual(promotion["event"], "rejected")
+        self.assertTrue(promotion["promotion_gate"]["block_ablation_missing"])
+        self.assertGreaterEqual(promotion["promotion_gate"]["candidates_backtested"], 1)
+
 
 class DomainRuleTests(unittest.TestCase):
     def test_place_slots_follow_hkjc_terms(self):
@@ -603,6 +731,18 @@ class DomainRuleTests(unittest.TestCase):
         self.assertTrue(quote_supported("練馬師表示 今仗以爭勝為目標", excerpt))
         self.assertFalse(quote_supported("今仗只係熱身", excerpt))
         self.assertFalse(quote_supported("爭勝", excerpt))
+
+
+class DecisionUnitTests(unittest.TestCase):
+    def test_kelly_fraction_respects_edge_and_cap(self):
+        self.assertAlmostEqual(kelly_fraction(0.5, 3.0, 0.25), 0.25)
+        self.assertAlmostEqual(kelly_fraction(0.45, 2.5, 1.0), 0.125 / 1.5, places=9)
+        self.assertEqual(kelly_fraction(0.2, 3.0, 0.25), 0.0)
+        self.assertEqual(kelly_fraction(0.9, 1.0, 0.25), 0.0)
+
+    def test_payout_odds_uses_hk_dividend(self):
+        self.assertAlmostEqual(payout_odds(42.5, 3.1), 4.25)
+        self.assertAlmostEqual(payout_odds(None, 3.1), 3.1)
 
 
 if __name__ == "__main__":
