@@ -12,6 +12,10 @@
 - 模型版本會保存 `feature_definitions` 快照，方便日後解讀舊模型。
 - `race.declared_starters` 同自動 `place_slots` 推導（本地賽 7 匹或以上 3 位、4-6 匹 2 位；少於 4 匹只係 1 位模型近似）。
 - `evaluate --kinds` / `--all-kinds`：預設只計 `pre-race` 預測。
+- `value-backtest`：用官方派彩結算 walk-forward 注項，支援 flat 同 fractional Kelly（`--cap` 封頂），報 ROI、turnover、drawdown。
+- `evaluate --coverage`：按預測信心分層的 selective-use 報告（只睇你會落注嗰部分）。
+- `fit --block` / `backtest --ablate`：具名特徵塊與配對 ablation；`promote` 在缺 ablation 時拒絕。
+- `promote` 報告加入 `candidates_backtested`，提醒多重比較風險；缺完整配對 ablation 會拒絕，唔提供人手跳過。
 
 ### Changed
 

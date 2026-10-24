@@ -114,6 +114,11 @@ python "<SKILL>/scripts/racing_lab.py" predict \
 
 完整命令及欄位遵循 [schemas-and-cli.md](references/schemas-and-cli.md)，指標與升級門檻遵循 [modeling-and-backtesting.md](references/modeling-and-backtesting.md)。
 
+## 價值與選擇性使用
+
+有官方派彩就一定要跑 `value-backtest`：報 ROI、turnover、max drawdown 同注碼政策，唔好只報 log loss。Kelly 會放大概率估計誤差；ROI 要由時間外派彩結算證明，唔好預設正回報，亦唔好將虧損修飾成「接近打和」。
+只買部分場次就用 `evaluate --coverage` 睇 selective-use：高分場次的表現在往同全場不同，甚至會反轉。
+
 ## 最後自檢
 
-交付前核對：場次與馬號無錯、來源真係讀過、賠率同資料截止時間一致、概率無重複或遺漏、意圖無冒充事實、預測已凍結、回測無未來資料、修正無繞過門檻。最後附一句：賽馬高方差，概率唔係保證；只以可承受損失作娛樂預算，唔追輸。
+交付前核對：場次與馬號無錯、來源真係讀過、賠率同資料截止時間一致、概率無重複或遺漏、意圖無冒充事實、預測已凍結、回測無未來資料、修正無繞過門檻、價值報告有報成本同 drawdown。最後附一句：賽馬高方差，概率唔係保證；只以可承受損失作娛樂預算，唔追輸。

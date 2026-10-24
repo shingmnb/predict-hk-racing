@@ -150,7 +150,23 @@ python "<SKILL>/scripts/racing_lab.py" backtest \
 python "<SKILL>/scripts/racing_lab.py" promote --db "racing-data/racing.db" --model-version "candidate-2026-10-24"
 ```
 
-`promote` 唔允許人手跳過門檻；未合資格會寫 `rejected`。做意圖 ablation 時，用另一個新版本名稱及完全相同的訓練／測試窗口，只移除 `intent_centered`。
+`promote` 唔允許人手跳過門檻；未合資格會寫 `rejected`。做 ablation 唔需要另開版本：`fit` 用 `--block name=feature,feature` 宣告特徵塊，`backtest --ablate name` 會在同一測試窗口重跑一次（移除該塊）並出 paired bootstrap。若模型宣告了 block 但 backtest 冇完整配對 ablation，`promote` 會拒絕，唔提供人手覆寫。報告同時列 `candidates_backtested`，提醒多重比較風險。
+
+## 價值與選擇性使用
+
+```bash
+python "<SKILL>/scripts/racing_lab.py" value-backtest \
+  --db "racing-data/racing.db" \
+  --model-version "candidate-2026-10-24" \
+  --stake kelly --cap 0.01 --bankroll 10000 \
+  --test-after "2026-10-24" \
+  --output "racing-data/evaluations/value.json"
+```
+
+- `--stake flat|kelly`：flat 用固定比例下注；kelly 用 `edge/(odds-1)`，以 `--cap` 封頂。
+- 結算優先用官方 `win_dividend`（香港以每 HK$10 報價，程式除以 10），冇先用快照賠率。
+- 報 turnover、ROI、strike rate、max drawdown、期末 bankroll；Kelly 會放大概率估計誤差，ROI 必須由時間外結算證明，唔好預設正回報。
+- `evaluate --coverage 5,10,20,50` 會按預測信心分層，報每層 log loss／Brier／命中率（selective-use），用嚟答「只買邊啲場」。
 
 ## 位置名額與特徵註冊
 
