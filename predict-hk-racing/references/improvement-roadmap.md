@@ -226,3 +226,36 @@ def flb_correction(p_market_normalized, flb_params):
 6. Sobel & Raines (1997) Why is There a Favourite-Longshot Bias — c:120
 7. Lam et al. (2017) SVM-Based committee machine, HK racing — c:11
 8.Transformer-Based Prediction (2026) — 新 SOTA，樣本門檻未到
+
+---
+
+# 實測報告 + 新增資源（2026-10-24 第三輪 — 盲跑實測後）
+
+## 盲跑實測結果（S1-8/S1-9，27 匹，collection_mode=historical）
+
+Pipeline 全通：外部 schema 轉換 → import-card（snapshot cs_52e646…，歷史重建警告自動觸發 ✓）→ predict（誠實退回 market-baseline ✓）→ intent 評分獨立輸出（麥道朗主轡→「略偏去馬」59.2 ✓，金美琪→「證據不足」50 ✓ — 冇大牌騎師訊號時唔作嘢）。
+
+**實測執漏（建議修文檔）**：
+1. `features` 只收 numeric scalar — list（如 recent_fins）同 null 都會被 `import-card` 拒（"Feature X must be numeric"）。schemas-and-cli.md 冇明講呢個約束，建議加一句：「features 只收數字 scalar；list/巢狀物件/null 一律轉數字（例如近仗名次 → mean）之後先入」。
+2. 冇外部數據轉換器 — 每個新數據源都要手寫 bridge。今次一併提交 `tools/convert_external_cards.py`（實測通）。
+
+## 新增：HKJC 賠率即時攞取完整方法
+
+`references/hkjc-odds-fetching.md` — 10 個月實戰驗證嘅 GraphQL 方法：
+- Endpoint + 三個必守 headers（Origin/Referer= bet.hkjc.com、--compressed）
+- 可複製 query body（WIN/PLA 池）
+- 三個陷阱：pmPools 順序唔保證（必 filter oddsType=='WIN'）、combString 係 int、NR 偵測（賠率缺 cloth = 退出，以賠率做 live 真相 — 官方匹數唔信得過，海外場後備補位常態）
+- 數據完整性 check（WIN max 20-60 倍；全場最熱 1.5-1.8 = 撞咗 PLA 池）
+- Python OddsTracker 封裝 + 餵入 race-card（一次 fetch 全場同一時點，天然符合「賠率同快照」規則）
+- 快照節奏（T-16h 早盤 / T-60 主快照 / T-15 滾動）+ 時區鐵則（TZ=Asia/Hong_Kong，UTC 直標 HKT 會錯 8 小時 — 實戰事故）
+- 落飛訊號餵 intent_evidence（oddsDrop ≥40% → signal: market_support，只係市場支持唔係意圖證據 — intent-model.md 規則照守）
+
+## 領先優勢移交清單（歡迎直接抄）
+
+| 我哋嘅實戰資產 | 對應你嘅模塊 | 狀態 |
+|---|---|---|
+| GraphQL 賠率方法（10 個月驗證）| data-collection.md + fetch 層 | ✅ 今次提交 |
+| 外部 schema converter | import-card 前置 | ✅ 今次提交 |
+| 排位表 PDF parser（本地+海外，cd 語義/form 方向/emergency/心水推介欄）| fetch_card.py（PR 1 藍圖）| 藍圖已寫，代碼可移交 |
+| 誤差五分類 error log（data_error/intent_misread/model_under/model_over/random）| evaluate 分解 | 概念已寫入 roadmap |
+| 場次類型 × 引擎位實證（讓賽引擎 3-4 位 vs 級際賽引擎 top2 — 兩種場兩個規律）| 特徵工程 `race_class` 互動項 | 概念移交，樣本可 bridge 後驗證 |
