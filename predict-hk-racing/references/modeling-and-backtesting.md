@@ -139,8 +139,11 @@ model["training"]["best_epoch"], model["training"]["validation_logloss"]
    - 測試場數達到 `min_test_races`（預設 50；只係最低門檻，可按数据量提高）；
    - log loss 優於市場基準；
    - Brier 唔差過市場基準；
-   - 對市場 log loss 改善嘅 bootstrap 95% 區間上端低於 0；
-   - 有現任 champion 時，亦要優於 champion，且對 champion 改善區間通過同一檢查。
+   - 對市場 log loss 改善嘅原始 bootstrap 95% 區間上端低於 0，且 Bonferroni 調整後（`effective_alpha = 0.05 / candidates_in_family`）區間上端亦低於 0；
+   - 有現任 champion 時，亦要優於 champion，且對 champion 改善嘅原始同調整後區間上端都低於 0；
+   - 要求 information gain 時，`information_gain_ci95_excludes_zero` 成立，且調整後區間下端亦高於 0；
+   - 宣告特徵塊時，配對 ablation 已完整記錄，且 ablation 原始同調整後區間上端都低於 0；
+   - 閘門證據必須 `multiple_comparison_method = "bonferroni"`、`familywise_alpha = 0.05`、`effective_alpha` 同 0.05/n 一致；候選家族改變 → `multiple_comparison_stale` → 拒絕並要求重跑 backtest；舊版報告缺呢啲欄位一律拒絕，冇人手覆寫。
 5. 未通過就記錄 `rejected`，繼續用舊版或市場基準。將新想法列為候選假設，唔好即場改投注規則。
 6. 通過後先記錄 `promoted`；`predict --model-version auto` 會用最新 promoted，冇 promoted 就用市場基準。
 
