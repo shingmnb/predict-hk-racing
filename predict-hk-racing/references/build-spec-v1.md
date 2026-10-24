@@ -134,9 +134,9 @@ def audit_snapshots(db_path: str, race_id: str | None = None) -> dict
 1. **Append-only**：任何 UPDATE/DELETE 觸發即失敗。
 2. **無泄漏**：`data_cutoff <= off_time`；有 result 之後拒收 card／odds。
 3. **校準只可用 OOF**：`isotonic_fit` / `platt_fit` 的 docstring 要保留警告，測試要驗證 in-sample 會被拒絕（加 `require_oof=True` 參數）。
-4. **Promotion gate**：`Δf² > 0`、logloss CI 上界 < 0、Brier 不差過市場、贏 champion，缺一不可。**Bootstrap 守門（#25）**：Bonferroni 調整後 CI 尾不可解（下界 index < 1，即 effective_alpha < 2/samples）→ `ci=[None,None]` + `ci_resolution_sufficient=false`，gate 一律拒絕；legacy 行缺 `ci_resolution_sufficient` 欄位同樣拒（對齊 main #24 `03f0d02a`）。
+4. **Promotion gate**：`Δf² > 0`、logloss CI 上界 < 0、Brier 不差過市場、贏 champion，缺一不可。**Bootstrap 守門（#25）**：Bonferroni 調整後 CI 尾不可解（判準一律寫「下界 index < 1」，唔寫單一通用 alpha 公式 — 兩條路徑 index 基數唔同：`information_gain_vs_market` 以 samples 為基，對應 `effective_alpha < 2/samples`；`bootstrap_logloss_difference` 以 samples−1 為基，對應 `effective_alpha < 2/(samples−1)`）→ `ci=[None,None]` + `ci_resolution_sufficient=false`，gate 一律拒絕；legacy 行缺 `ci_resolution_sufficient` 欄位同樣拒（對齊 main #24 `03f0d02a`）。
 5. **注碼**：永不超过 bankroll／單注／彩池／同場上限，且向下取整。
-6. **Q/PQ 機率**：Q 全部 unordered pair 總和 = 1；PQ 全部 unordered pair 總和 = 3（三甲 C(3,2)=3 對）；兩者邊際同為 `Σ_j P(i,j) = 2 × P(i 入三甲)`。（唔可以一句「總和 = 1」同時套 Q 同 PQ — 19:28Z 審查修訂）
+6. **Q/PQ 機率**：Q 全部 unordered pair 總和 = 1，逐馬邊際 `Σ_(j≠i) p^Q(i,j) = P(i 入前二)`；PQ 全部 unordered pair 總和 = 3（三甲 C(3,2)=3 對），逐馬邊際 `Σ_(j≠i) p^PQ(i,j) = 2 × P(i 入三甲)`。Q 同 PQ 邊際唔可以共用同一條公式 — Q 係前二 pair，i 入前二只連 1 對；PQ 先係 i 入三甲連 2 對（#26 修訂）。（唔可以一句「總和 = 1」同時套 Q 同 PQ — 19:28Z 審查修訂）
 
 ## 5. 交付順序
 
