@@ -17,6 +17,46 @@
 
 未夠歷史樣本時，輸出市場基準、意圖證據及定性形勢，明確標示「未有已驗證模型優勢」。唔好用自創權重假裝精準 AI 概率。
 
+## 機率校準層（isotonic / Platt）
+
+**去水 ≠ 校準。** Shin 只係移除書商水位，模型輸出仍然可能系統性過度自信或不足。校準層負責把 raw probability 映射到實際命中率。
+
+```python
+from racing_model import isotonic_fit, isotonic_apply, platt_fit, platt_apply, expected_calibration_error
+
+model = isotonic_fit(oof_probs, oof_labels)   # PAVA，單調非遞減
+p_cal = isotonic_apply(model, raw_prob)
+
+platt = platt_fit(oof_probs, oof_labels)      # sigmoid(a·logit(p)+b)
+p_cal = platt_apply(platt, raw_prob)
+
+ece = expected_calibration_error(list(zip(oof_probs, oof_labels)))
+```
+
+**最重要的紀律：校準模型只可以用 out-of-fold 預測擬合。** 用 in-sample 預測擬合會把賽果泄漏入校準器，令校準看起來完美但實際失效。做法：walk-forward 每個窗口用之前窗口訓練、當前窗口預測，收集所有 OOF 預測後才 fit 一次。
+
+- `isotonic`：非參數、樣本多時較準；小樣本（<500 點）容易階梯化，建議配 `n ≥ 300`。
+- `platt`：兩個參數、小樣本穩定，但只能修正單調壓縮，修正不了非單調偏差。
+- `ece`：10 等寬 bin 的加權 |confidence − accuracy|；< 0.05 可接受。
+
+## Early stopping（`fit_model`）
+
+```python
+model = fit_model(
+    records, features,
+    epochs=300,
+    validation_fraction=0.25,      # 最後 25% 賽事做 hold-out（時間順序）
+    early_stopping_patience=15,    # 15 個 epoch 無改善就停
+    min_epochs=20,
+)
+model["training"]["best_epoch"], model["training"]["validation_logloss"]
+```
+
+- 預設 `validation_fraction=0.0`，行為同舊版完全一致（可重現）。
+- hold-out 一定係**時間上最後**的賽事，唔可以隨機抽，否則泄漏未來。
+- 停止後會還原最佳 epoch 的係數，唔係最後一個 epoch。
+- `training` 新增：`validation_races`、`validation_logloss`、`best_epoch`、`stopped_early`、`validation_note`。
+
 ## De-vig 方法與 Q/PQ 聯合機率
 
 `market_probabilities(runners, method=...)` 支援兩種去水方法：

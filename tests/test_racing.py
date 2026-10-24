@@ -17,9 +17,15 @@ SCRIPTS = ROOT / "predict-hk-racing" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 from racing_model import (  # noqa: E402
     assess_intent,
+    expected_calibration_error,
+    fit_model,
+    isotonic_apply,
+    isotonic_fit,
     market_probabilities,
     pair_probabilities,
     place_probabilities,
+    platt_apply,
+    platt_fit,
     shin_probabilities,
 )
 
@@ -90,6 +96,45 @@ class ModelUnitTests(unittest.TestCase):
             marginal = sum(p for (a, b), p in pairs.items() if a == i or b == i)
             # 每個入三甲的馬會出現在 2 個 pair 之中
             self.assertAlmostEqual(marginal, 2.0 * place[i], places=9)
+
+    def _calibration_sample(self):
+        rng = random.Random(7)
+        scores, labels, truth = [], [], []
+        for _ in range(600):
+            true_p = rng.uniform(0.02, 0.98)
+            # raw 預測被壓向 0.5（典型未校準模型）
+            scores.append(0.5 + 0.45 * (true_p - 0.5))
+            labels.append(1 if rng.random() < true_p else 0)
+            truth.append(true_p)
+        return scores, labels, truth
+
+    @staticmethod
+    def _brier(probabilities, labels):
+        return sum((p - y) ** 2 for p, y in zip(probabilities, labels)) / len(labels)
+
+    def test_isotonic_is_monotone_and_improves_brier(self):
+        scores, labels, _ = self._calibration_sample()
+        model = isotonic_fit(scores, labels)
+        self.assertEqual(model["y"], sorted(model["y"]))
+        self.assertEqual(len(model["x"]), len(model["y"]))
+        calibrated = [isotonic_apply(model, score) for score in scores]
+        self.assertLess(self._brier(calibrated, labels), self._brier(scores, labels))
+        # 邊界 clamp，唔會出界
+        self.assertAlmostEqual(isotonic_apply(model, -1.0), model["y"][0])
+        self.assertAlmostEqual(isotonic_apply(model, 2.0), model["y"][-1])
+
+    def test_platt_scaling_improves_brier(self):
+        scores, labels, _ = self._calibration_sample()
+        model = platt_fit(scores, labels)
+        calibrated = [platt_apply(model, score) for score in scores]
+        self.assertLess(self._brier(calibrated, labels), self._brier(scores, labels))
+        self.assertTrue(math.isfinite(model["a"]) and math.isfinite(model["b"]))
+
+    def test_expected_calibration_error(self):
+        self.assertAlmostEqual(expected_calibration_error([(0.9, 1)] * 90 + [(0.9, 0)] * 10), 0.0)
+        self.assertAlmostEqual(expected_calibration_error([(1.0, 0)]), 1.0)
+        with self.assertRaises(ValueError):
+            expected_calibration_error([])
 
     def test_intent_is_shrunk_and_missing_is_unknown(self):
         missing = assess_intent({"intent_evidence": []})
@@ -205,6 +250,57 @@ class PipelineIntegrationTests(unittest.TestCase):
             }],
             "runners": runners,
         }, probabilities
+
+    def test_fit_model_early_stopping_holds_out_last_races(self):
+        records = []
+        for offset in range(12):
+            date = f"2025-01-{offset + 1:02d}"
+            card, probabilities = self.make_card(date, race_no=(offset % 5) + 1)
+            winner = max(range(len(probabilities)), key=lambda i: probabilities[i]) + 1
+            results = [
+                {
+                    "horse_no": number,
+                    "finish_position": 1 if number == winner else number + 1,
+                    "status": "OK",
+                }
+                for number in range(1, len(probabilities) + 1)
+            ]
+            records.append({"card": card, "result": {"results": results}})
+
+        features = ["cd_place_rate", "recent_finish_mean", "days_since_run", "market_logp"]
+        model = fit_model(
+            records,
+            features,
+            epochs=60,
+            validation_fraction=0.25,
+            early_stopping_patience=5,
+        )
+        training = model["training"]
+        self.assertEqual(training["validation_races"], 3)
+        self.assertIsNotNone(training["validation_logloss"])
+        self.assertLessEqual(training["best_epoch"], 60)
+        self.assertGreaterEqual(training["best_epoch"], 20)
+        self.assertTrue(all(math.isfinite(value) for value in model["coefficients"].values()))
+
+    def test_fit_model_defaults_unchanged(self):
+        records = []
+        for offset in range(6):
+            card, probabilities = self.make_card(f"2025-02-{offset + 1:02d}", race_no=1)
+            winner = max(range(len(probabilities)), key=lambda i: probabilities[i]) + 1
+            results = [
+                {
+                    "horse_no": number,
+                    "finish_position": 1 if number == winner else number + 1,
+                    "status": "OK",
+                }
+                for number in range(1, len(probabilities) + 1)
+            ]
+            records.append({"card": card, "result": {"results": results}})
+        model = fit_model(records, ["cd_place_rate", "recent_finish_mean"], epochs=5)
+        self.assertEqual(model["training"]["validation_races"], 0)
+        self.assertIsNone(model["training"]["validation_logloss"])
+        self.assertFalse(model["training"]["stopped_early"])
+        self.assertEqual(model["training"]["best_epoch"], 5)
 
     def test_end_to_end_and_safety_guards(self):
         self.run_cli("init", "--db", self.db)
