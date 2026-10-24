@@ -18,8 +18,8 @@
 
 ## 安裝
 
-- 從 [Releases](https://github.com/shingmnb/predict-hk-racing/releases) 下載 `predict-hk-racing.skill`，匯入支援 `.skill` 套件嘅 agent。
-- 或直接使用 repo 內嘅 [`predict-hk-racing/`](predict-hk-racing/) 源文件。
+- 而家可直接使用 repo 內嘅 [`predict-hk-racing/`](predict-hk-racing/) 源文件。
+- 首個 Release 發佈後，亦可從 [Releases](https://github.com/shingmnb/predict-hk-racing/releases) 下載 `predict-hk-racing.skill`，匯入支援 `.skill` 套件嘅 agent。
 - 完整操作指引見 [`predict-hk-racing/SKILL.md`](predict-hk-racing/SKILL.md)。
 
 ## 快速開始
@@ -49,7 +49,7 @@ python predict-hk-racing/scripts/racing_lab.py predict \
 predict-hk-racing/       # 可分發 Skill（SKILL.md、scripts、references、assets）
 tests/                   # 標準庫 unittest；全部使用虛構資料
 tools/package_skill.py   # Skill 驗證、打包及 SHA-256
-.github/workflows/       # CI 測試及 tag 觸發 Release
+.github/workflows/       # 待權限啟用後加入：CI 測試及 tag Release
 .github/ISSUE_TEMPLATE/  # Bug 與功能建議
 CONTRIBUTING.md          # 維護及 PR 流程
 CHANGELOG.md             # 版本紀錄
@@ -68,7 +68,7 @@ python tools/package_skill.py --check-only
 python tools/package_skill.py --output dist
 ```
 
-採用 Semantic Versioning。推送 `v*.*.*` tag 會觸發測試、打包 `.skill`、產生 SHA-256 並建立 GitHub Release。詳見 [CONTRIBUTING.md](CONTRIBUTING.md)。
+採用 Semantic Versioning。CI／Release 配置啟用後，推送 `v*.*.*` tag 將會觸發測試、打包 `.skill`、產生 SHA-256 並建立 GitHub Release。詳見 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
 ## 數據與限制
 
