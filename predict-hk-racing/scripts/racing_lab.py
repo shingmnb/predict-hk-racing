@@ -36,6 +36,7 @@ from racing_model import (  # noqa: E402
 )
 
 VERSION_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+FAMILYWISE_ALPHA = 0.05
 IMMUTABLE_TABLES = [
     "card_snapshots",
     "result_snapshots",
@@ -643,9 +644,82 @@ def walk_forward(records: list[dict], template: dict, test_indices: list[int], r
     return rows
 
 
+def bonferroni_alpha(candidates_in_family: int) -> float:
+    if (
+        isinstance(candidates_in_family, bool)
+        or not isinstance(candidates_in_family, int)
+        or candidates_in_family < 1
+    ):
+        raise ValueError("candidates_in_family must be a positive integer")
+    return FAMILYWISE_ALPHA / candidates_in_family
+
+
+def promotion_eligible(gate: dict) -> bool:
+    """Apply every promotion condition, rejecting legacy or stale gate evidence."""
+    candidates = gate.get("candidates_in_family")
+    policy_valid = (
+        isinstance(candidates, int)
+        and not isinstance(candidates, bool)
+        and candidates >= 1
+        and gate.get("multiple_comparison_method") == "bonferroni"
+        and gate.get("familywise_alpha") == FAMILYWISE_ALPHA
+    )
+    if policy_valid:
+        effective_alpha = gate.get("effective_alpha")
+        policy_valid = (
+            isinstance(effective_alpha, (int, float))
+            and not isinstance(effective_alpha, bool)
+            and math.isclose(
+                effective_alpha,
+                bonferroni_alpha(candidates),
+                rel_tol=1e-12,
+                abs_tol=1e-15,
+            )
+        )
+    required = (
+        "enough_test_races",
+        "logloss_beats_market_baseline",
+        "brier_not_worse_than_market",
+        "logloss_improvement_ci95_excludes_zero",
+        "logloss_improvement_adjusted_ci_excludes_zero",
+        "beats_current_champion",
+        "multiple_comparison_adjusted",
+    )
+    eligible = (
+        policy_valid
+        and gate.get("multiple_comparison_stale") is False
+        and all(gate.get(key) is True for key in required)
+    )
+    if gate.get("champion_comparison_required"):
+        eligible = eligible and gate.get("champion_improvement_adjusted_ci_excludes_zero") is True
+    if gate.get("information_gain_required"):
+        eligible = (
+            eligible
+            and gate.get("information_gain_ci95_excludes_zero") is True
+            and gate.get("information_gain_adjusted_ci_excludes_zero") is True
+        )
+    if gate.get("block_ablation_required"):
+        eligible = (
+            eligible
+            and gate.get("block_ablation_recorded") is True
+            and gate.get("block_ablation_ci95_excludes_zero") is True
+            and gate.get("block_ablation_adjusted_ci_excludes_zero") is True
+        )
+    return bool(eligible)
+
+
 def command_backtest(args) -> dict:
     with connect(args.db) as db:
         template = get_model(db, args.model_version)
+        existing_candidates = db.execute(
+            "SELECT COUNT(DISTINCT model_version) FROM evaluation_runs WHERE kind = 'backtest'"
+        ).fetchone()[0]
+        candidate_seen = db.execute(
+            "SELECT 1 FROM evaluation_runs WHERE kind = 'backtest' AND model_version = ? LIMIT 1",
+            (args.model_version,),
+        ).fetchone()
+        candidates_in_family = existing_candidates + (0 if candidate_seen else 1)
+        effective_alpha = bonferroni_alpha(candidates_in_family)
         records = load_records(db)
         test_indices = []
         for index, record in enumerate(records):
@@ -672,9 +746,11 @@ def command_backtest(args) -> dict:
         baseline_rows = [pair[1] for pair in paired]
         candidate_summary = summarize_rows(candidate_rows)
         baseline_summary = summarize_rows(baseline_rows)
-        comparison = bootstrap_logloss_difference(candidate_rows, baseline_rows, samples=args.bootstrap)
+        comparison = bootstrap_logloss_difference(
+            candidate_rows, baseline_rows, samples=args.bootstrap, alpha=effective_alpha
+        )
         information_gain = information_gain_vs_market(
-            candidate_rows, baseline_rows, samples=args.bootstrap
+            candidate_rows, baseline_rows, samples=args.bootstrap, alpha=effective_alpha
         )
 
         champion_version = latest_promoted(db)
@@ -687,7 +763,7 @@ def command_backtest(args) -> dict:
             aligned = [by_race[row["race_id"]] for row in candidate_rows if row["race_id"] in by_race]
             if len(aligned) == len(candidate_rows):
                 champion_summary = summarize_rows(aligned)
-                champion_comparison = bootstrap_logloss_difference(candidate_rows, aligned, samples=args.bootstrap)
+                champion_comparison = bootstrap_logloss_difference(candidate_rows, aligned, samples=args.bootstrap, alpha=effective_alpha)
             else:
                 champion_summary = summarize_rows(champion_rows)
 
@@ -712,7 +788,7 @@ def command_backtest(args) -> dict:
                     "features_removed": removed,
                     "without_block": summarize_rows(aligned),
                     "candidate_minus_without_block": bootstrap_logloss_difference(
-                        candidate_rows, aligned, samples=args.bootstrap
+                        candidate_rows, aligned, samples=args.bootstrap, alpha=effective_alpha
                     ),
                     "interpretation": (
                         "負數代表保留該 block 較好；區間跨 0 即該 block 未證明有時間外價值。"
@@ -734,49 +810,86 @@ def command_backtest(args) -> dict:
             candidate_summary.get("brier", math.inf) <= baseline_summary.get("brier", math.inf)
         )
         significant = comparison["ci95"][1] is not None and comparison["ci95"][1] < 0
+        significant_adjusted = comparison["ci"][1] is not None and comparison["ci"][1] < 0
+        champion_comparison_required = bool(champion_version and champion_version != args.model_version)
+        champion_significant = True
+        champion_adjusted_significant = True
         beats_champion = True
-        if champion_version and champion_version != args.model_version:
+        beats_champion_adjusted = True
+        if champion_comparison_required:
             champion_ci_upper = champion_comparison["ci95"][1] if champion_comparison else None
-            beats_champion = bool(
+            champion_adjusted_ci_upper = champion_comparison["ci"][1] if champion_comparison else None
+            champion_point_better = bool(
                 champion_summary
                 and champion_summary.get("race_count") == candidate_summary.get("race_count")
                 and candidate_summary["logloss"] < champion_summary["logloss"]
-                and champion_ci_upper is not None
-                and champion_ci_upper < 0
             )
+            champion_significant = champion_ci_upper is not None and champion_ci_upper < 0
+            champion_adjusted_significant = bool(
+                champion_adjusted_ci_upper is not None and champion_adjusted_ci_upper < 0
+            )
+            beats_champion = champion_point_better and champion_significant
+            beats_champion_adjusted = champion_point_better and champion_adjusted_significant
         information_gain_positive = bool(
             information_gain.get("delta") is not None and information_gain["delta"] > 0
         )
         information_gain_significant = bool(
             information_gain["ci95"][0] is not None and information_gain["ci95"][0] > 0
         )
+        information_gain_adjusted_significant = bool(
+            information_gain["ci"][0] is not None and information_gain["ci"][0] > 0
+        )
         require_information_gain = bool(getattr(args, "require_information_gain", False))
         block_ablation_required = bool(template.get("feature_blocks"))
-        block_ablation_recorded = bool(
-            ablation and "candidate_minus_without_block" in ablation
+        block_ablation_recorded = bool(ablation and "candidate_minus_without_block" in ablation)
+        ablation_comparison = ablation.get("candidate_minus_without_block") if block_ablation_recorded else None
+        block_ablation_significant = bool(
+            ablation_comparison
+            and ablation_comparison["ci95"][1] is not None
+            and ablation_comparison["ci95"][1] < 0
         )
+        block_ablation_adjusted_significant = bool(
+            ablation_comparison
+            and ablation_comparison["ci"][1] is not None
+            and ablation_comparison["ci"][1] < 0
+        )
+        multiple_comparison_adjusted = all((
+            significant_adjusted,
+            beats_champion_adjusted,
+            information_gain_adjusted_significant if require_information_gain else True,
+            block_ablation_adjusted_significant if block_ablation_required else True,
+        ))
         gate = {
             "min_test_races_required": args.min_test_races,
             "enough_test_races": enough,
             "logloss_beats_market_baseline": beats_baseline,
             "brier_not_worse_than_market": brier_not_worse,
             "logloss_improvement_ci95_excludes_zero": significant,
+            "logloss_improvement_adjusted_ci_excludes_zero": significant_adjusted,
+            "champion_comparison_required": champion_comparison_required,
+            "champion_improvement_ci95_excludes_zero": champion_significant,
+            "champion_improvement_adjusted_ci_excludes_zero": champion_adjusted_significant,
             "beats_current_champion": beats_champion,
             "information_gain_required": require_information_gain,
             "information_gain_positive": information_gain_positive,
             "information_gain_ci95_excludes_zero": information_gain_significant,
+            "information_gain_adjusted_ci_excludes_zero": information_gain_adjusted_significant,
             "block_ablation_required": block_ablation_required,
             "block_ablation_recorded": block_ablation_recorded,
-            "eligible": (
-                enough
-                and beats_baseline
-                and brier_not_worse
-                and significant
-                and beats_champion
-                and (information_gain_positive if require_information_gain else True)
-                and (block_ablation_recorded if block_ablation_required else True)
+            "block_ablation_ci95_excludes_zero": block_ablation_significant,
+            "block_ablation_adjusted_ci_excludes_zero": block_ablation_adjusted_significant,
+            "candidates_backtested": candidates_in_family,
+            "candidates_in_family": candidates_in_family,
+            "familywise_alpha": FAMILYWISE_ALPHA,
+            "effective_alpha": effective_alpha,
+            "multiple_comparison_method": "bonferroni",
+            "multiple_comparison_adjusted": multiple_comparison_adjusted,
+            "multiple_comparison_stale": False,
+            "multiple_comparison_note": (
+                "Bonferroni 按候選模型數調整每個 CI；候選家族改變後必須重跑 backtest。"
             ),
         }
+        gate["eligible"] = promotion_eligible(gate)
         report = {
             "kind": "walk-forward-backtest-v1",
             "created_at": now_iso(),
@@ -824,17 +937,30 @@ def command_promote(args) -> dict:
         report = json.loads(row["report_json"])
         gate = dict(report["promotion_gate"])
         model = get_model(db, args.model_version)
-        candidates_tried = db.execute(
+        current_candidates = db.execute(
             "SELECT COUNT(DISTINCT model_version) FROM evaluation_runs WHERE kind = 'backtest'"
         ).fetchone()[0]
-        gate["candidates_backtested"] = candidates_tried
-        gate["multiple_comparison_note"] = (
-            "每次新候選都是一次檢定；候選越多，單一 CI 的假陽性風險越高。"
+        current_alpha = bonferroni_alpha(current_candidates)
+        stored_alpha = gate.get("effective_alpha")
+        alpha_matches = (
+            isinstance(stored_alpha, (int, float))
+            and not isinstance(stored_alpha, bool)
+            and math.isclose(stored_alpha, current_alpha, rel_tol=1e-12, abs_tol=1e-15)
         )
+        stale = gate.get("candidates_in_family") != current_candidates or not alpha_matches
+        gate["candidates_backtested"] = current_candidates
+        gate["current_candidates_in_family"] = current_candidates
+        gate["current_effective_alpha"] = current_alpha
+        gate["multiple_comparison_stale"] = stale
+        gate["multiple_comparison_note"] = (
+            "Bonferroni 按候選模型數調整每個 CI；候選家族改變後必須重跑 backtest。"
+        )
+        if stale:
+            gate["multiple_comparison_adjusted"] = False
         ablation_missing = bool(model.get("feature_blocks")) and not gate.get("block_ablation_recorded")
         if ablation_missing:
-            gate["eligible"] = False
             gate["block_ablation_missing"] = True
+        gate["eligible"] = promotion_eligible(gate)
         event_type = "promoted" if gate["eligible"] else "rejected"
         event_id = "me_" + uuid.uuid4().hex
         db.execute(
