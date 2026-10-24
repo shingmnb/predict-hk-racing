@@ -715,6 +715,74 @@ def metric_row(card: dict, result: dict, prediction: dict) -> dict | None:
         "winner_probability": winner_item["win_probability"],
         "place_brier": mean(place_errors) if place_errors else None,
         "calibration": calibration,
+        "runner_count": len(by_horse),
+    }
+
+
+def pseudo_r2(rows: list[dict]) -> float | None:
+    """McFadden pseudo-R²: ``1 - mean_logloss / mean_log(runners)``.
+
+    The denominator is the log loss of a uniform model over each race's field
+    size, i.e. the "knows nothing" benchmark. ``f² = 1`` is perfect, ``0`` is
+    no better than picking uniformly at random. Benter (1994) uses this to
+    measure how much a model explains relative to the betting public.
+    """
+    if not rows:
+        return None
+    logloss = mean(row["logloss"] for row in rows)
+    null_logloss = mean(math.log(max(2, int(row.get("runner_count") or 2))) for row in rows)
+    if null_logloss <= 0:
+        return None
+    return 1.0 - logloss / null_logloss
+
+
+def information_gain_vs_market(
+    candidate_rows: list[dict],
+    market_rows: list[dict],
+    *,
+    samples: int = 1000,
+    seed: int = 20261024,
+) -> dict:
+    """Δf² (Benter 1994): how much information the model adds over the market.
+
+    ``delta > 0`` means the candidate explains variance that the de-vigged
+    market baseline does not. A positive point estimate alone is not enough —
+    the bootstrap CI must exclude zero before promoting (see
+    ``promotion_gate.information_gain_ci95_excludes_zero``).
+    """
+    import random
+
+    empty = {
+        "candidate_pseudo_r2": None,
+        "market_pseudo_r2": None,
+        "delta": None,
+        "ci95": [None, None],
+        "race_count": 0,
+    }
+    if not candidate_rows or len(candidate_rows) != len(market_rows):
+        return empty
+
+    deltas = []
+    for candidate, market in zip(candidate_rows, market_rows):
+        runner_count = int(candidate.get("runner_count") or market.get("runner_count") or 2)
+        scale = math.log(max(2, runner_count))
+        deltas.append(-(candidate["logloss"] - market["logloss"]) / scale)
+
+    observed = mean(deltas)
+    if len(deltas) == 1 or samples <= 0:
+        ci95 = [None, None]
+    else:
+        rng = random.Random(seed)
+        n = len(deltas)
+        estimates = sorted(mean(deltas[rng.randrange(n)] for _ in range(n)) for _ in range(samples))
+        ci95 = [estimates[int(0.025 * samples)], estimates[max(0, int(0.975 * samples) - 1)]]
+
+    return {
+        "candidate_pseudo_r2": pseudo_r2(candidate_rows),
+        "market_pseudo_r2": pseudo_r2(market_rows),
+        "delta": observed,
+        "ci95": ci95,
+        "race_count": len(deltas),
     }
 
 

@@ -20,6 +20,7 @@ from racing_model import (  # noqa: E402
     assess_intent,
     expected_calibration_error,
     fit_model,
+    information_gain_vs_market,
     isotonic_apply,
     isotonic_fit,
     market_probabilities,
@@ -27,6 +28,7 @@ from racing_model import (  # noqa: E402
     place_probabilities,
     platt_apply,
     platt_fit,
+    pseudo_r2,
     shin_probabilities,
 )
 
@@ -136,6 +138,26 @@ class ModelUnitTests(unittest.TestCase):
         self.assertAlmostEqual(expected_calibration_error([(1.0, 0)]), 1.0)
         with self.assertRaises(ValueError):
             expected_calibration_error([])
+
+    def test_pseudo_r2_matches_mcfadden(self):
+        rows = [{"logloss": 0.5, "runner_count": 10} for _ in range(5)]
+        self.assertAlmostEqual(pseudo_r2(rows), 1.0 - 0.5 / math.log(10))
+        self.assertIsNone(pseudo_r2([]))
+
+    def test_information_gain_vs_market_detects_improvement(self):
+        market = [{"logloss": 0.60, "runner_count": 10} for _ in range(30)]
+        candidate = [{"logloss": 0.55, "runner_count": 10} for _ in range(30)]
+        gain = information_gain_vs_market(candidate, market, samples=200)
+        self.assertGreater(gain["delta"], 0.0)
+        self.assertGreater(gain["ci95"][0], 0.0)
+        self.assertEqual(gain["race_count"], 30)
+        worse = information_gain_vs_market(market, candidate, samples=200)
+        self.assertLess(worse["delta"], 0.0)
+
+    def test_information_gain_handles_mismatch(self):
+        gain = information_gain_vs_market([{"logloss": 0.5, "runner_count": 8}], [])
+        self.assertIsNone(gain["delta"])
+        self.assertEqual(gain["ci95"], [None, None])
 
     def test_intent_is_shrunk_and_missing_is_unknown(self):
         missing = assess_intent({"intent_evidence": []})
