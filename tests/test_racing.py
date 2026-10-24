@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "predict-hk-racing" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 from domain import derive_place_slots, quote_supported  # noqa: E402
-from decision import kelly_fraction, payout_odds  # noqa: E402
+from decision import payout_odds, settle_stream  # noqa: E402
 from staking import edge, kelly_fraction, plan_race, stake_size  # noqa: E402
 from racing_model import (  # noqa: E402
     assess_intent,
@@ -718,6 +718,23 @@ class PipelineIntegrationTests(unittest.TestCase):
         )
         self.assertIsNotNone(settlement["roi"])
 
+        kelly_report = json.loads(
+            self.run_cli(
+                "value-backtest", "--db", self.db, "--model-version", "value-v1",
+                "--stake", "kelly", "--cap", 0.02, "--min-edge", -5,
+                "--kelly-multiplier", 0.2, "--max-race-fraction", 0.03,
+                "--pool-size", 1_000_000, "--stake-unit", 1,
+                "--min-train-races", 4, "--refit-every", 2,
+                "--test-after", "2026-08-05",
+            ).stdout
+        )
+        kelly_settlement = kelly_report["settlement"]
+        self.assertEqual(kelly_settlement["kelly_multiplier"], 0.2)
+        self.assertEqual(kelly_settlement["max_race_fraction"], 0.03)
+        self.assertEqual(kelly_settlement["max_pool_fraction"], 0.001)
+        self.assertEqual(kelly_report["method"]["pool_size_assumption"], 1_000_000)
+        self.assertEqual(kelly_report["method"]["stake_unit"], 1)
+
     def test_evaluate_reports_selective_use_bands(self):
         self.run_cli("init", "--db", self.db)
         for index in range(4):
@@ -802,11 +819,93 @@ class DomainRuleTests(unittest.TestCase):
 
 
 class DecisionUnitTests(unittest.TestCase):
-    def test_kelly_fraction_respects_edge_and_cap(self):
-        self.assertAlmostEqual(kelly_fraction(0.5, 3.0, 0.25), 0.25)
-        self.assertAlmostEqual(kelly_fraction(0.45, 2.5, 1.0), 0.125 / 1.5, places=9)
-        self.assertEqual(kelly_fraction(0.2, 3.0, 0.25), 0.0)
-        self.assertEqual(kelly_fraction(0.9, 1.0, 0.25), 0.0)
+    @staticmethod
+    def settlement_stream(runners):
+        prediction = {"race_id": "R1", "runners": runners}
+        record = {
+            "result": {
+                "results": [
+                    {"horse_no": 1, "finish_position": 1, "win_dividend": 60.0}
+                ]
+            }
+        }
+        return [(record, prediction)]
+
+    def test_kelly_fraction_uses_shared_two_argument_api(self):
+        self.assertAlmostEqual(kelly_fraction(0.5, 3.0), 0.25)
+        self.assertAlmostEqual(kelly_fraction(0.45, 2.5), 0.125 / 1.5, places=9)
+        self.assertEqual(kelly_fraction(0.2, 3.0), 0.0)
+        self.assertEqual(kelly_fraction(0.9, 1.0), 0.0)
+
+    def test_kelly_settlement_matches_shared_stake_size(self):
+        runners = [{"horse_no": 1, "win_probability": 0.2, "win_odds_snapshot": 6.0}]
+        settlement = settle_stream(
+            self.settlement_stream(runners), stake_mode="kelly", cap=0.02,
+            bankroll=10_000, min_edge=0.02, kelly_multiplier=0.25,
+        )
+        expected = stake_size(
+            0.2, 6.0, 10_000, kelly_multiplier=0.25,
+            min_edge=0.02, max_bankroll_fraction=0.02,
+        )
+        self.assertEqual(expected["status"], "bet")
+        self.assertEqual(settlement["detail"][0]["stake"], expected["stake"])
+
+    def test_kelly_settlement_enforces_race_cap_for_two_bets(self):
+        runners = [
+            {"horse_no": number, "win_probability": 0.3, "win_odds_snapshot": 4.0}
+            for number in (1, 2)
+        ]
+        settlement = settle_stream(
+            self.settlement_stream(runners), stake_mode="kelly", cap=0.05,
+            bankroll=10_000, min_edge=0.02, kelly_multiplier=1.0,
+            max_race_fraction=0.02,
+        )
+        self.assertEqual(settlement["bets"], 2)
+        total_stake = sum(item["stake"] for item in settlement["detail"])
+        self.assertLessEqual(total_stake, 0.02 * 10_000)
+
+    def test_kelly_settlement_enforces_pool_cap(self):
+        runners = [{"horse_no": 1, "win_probability": 0.4, "win_odds_snapshot": 4.0}]
+        settlement = settle_stream(
+            self.settlement_stream(runners), stake_mode="kelly", cap=0.05,
+            bankroll=1_000_000, min_edge=0.02, kelly_multiplier=1.0,
+            pool_size=50_000,
+        )
+        self.assertEqual(settlement["bets"], 1)
+        self.assertLessEqual(settlement["detail"][0]["stake"], 50_000 * 0.001)
+
+    def test_fractional_caps_never_round_up(self):
+        runners = [{"horse_no": 1, "win_probability": 0.4, "win_odds_snapshot": 4.0}]
+        expected = stake_size(
+            0.4, 4.0, 1_000_000, kelly_multiplier=1.0, min_edge=0.02,
+            max_bankroll_fraction=0.05, pool_size=50_005, unit=0,
+        )
+        settlement = settle_stream(
+            self.settlement_stream(runners), stake_mode="kelly", cap=0.05,
+            bankroll=1_000_000, min_edge=0.02, kelly_multiplier=1.0,
+            pool_size=50_005, unit=0,
+        )
+        self.assertEqual(settlement["detail"][0]["stake"], expected["stake"])
+        self.assertLessEqual(settlement["detail"][0]["stake"], 50_005 * 0.001)
+
+        plan = plan_race(
+            [{"probability": 0.5, "decimal_odds": 3.0}], 10_000,
+            max_race_fraction=0.0100005, kelly_multiplier=1.0,
+            max_bankroll_fraction=1.0, unit=0,
+        )
+        self.assertLessEqual(plan["total_stake"], plan["race_cap"])
+        self.assertLessEqual(plan["bets"][0]["stake"], plan["race_cap"])
+
+    def test_race_cap_never_exceeds_bankroll(self):
+        bets = [
+            {"probability": 0.9, "decimal_odds": 2.0, "horse_no": number}
+            for number in (1, 2, 3)
+        ]
+        plan = plan_race(
+            bets, 1_000, max_race_fraction=2.0,
+            kelly_multiplier=1.0, max_bankroll_fraction=1.0,
+        )
+        self.assertLessEqual(plan["total_stake"], 1_000)
 
     def test_payout_odds_uses_hk_dividend(self):
         self.assertAlmostEqual(payout_odds(42.5, 3.1), 4.25)

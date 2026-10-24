@@ -9,16 +9,7 @@ from __future__ import annotations
 import math
 
 from racing_model import summarize_rows
-
-
-def kelly_fraction(probability: float, odds: float, cap: float) -> float:
-    """Fractional Kelly stake as a share of bankroll, capped and floored at zero."""
-    if not isinstance(odds, (int, float)) or odds <= 1.0 or cap <= 0:
-        return 0.0
-    edge = float(probability) * float(odds) - 1.0
-    if edge <= 0.0:
-        return 0.0
-    return max(0.0, min(float(cap), edge / (float(odds) - 1.0)))
+from staking import plan_race, stake_size
 
 
 def payout_odds(win_dividend: object, fallback_odds: float) -> float:
@@ -53,11 +44,17 @@ def settle_stream(
     cap: float,
     bankroll: float,
     min_edge: float,
+    kelly_multiplier: float = 0.25,
+    max_race_fraction: float = 0.05,
+    pool_size: float | dict[str, float] | None = None,
+    max_pool_fraction: float = 0.001,
+    unit: float = 10.0,
 ) -> dict:
     """Settle a walk-forward stream of (record, prediction) pairs.
 
-    ``stake_mode`` is ``flat`` (fixed fraction of bankroll) or ``kelly``
-    (fractional Kelly using the model probability against the taken odds).
+    ``flat`` keeps the legacy best-runner-only policy. ``kelly`` delegates all
+    sizing to :mod:`staking`, including fractional Kelly, pool and race caps.
+    ``pool_size`` may be one explicit backtest assumption or a race-id mapping.
     """
     bank = float(bankroll)
     start = bank
@@ -68,51 +65,117 @@ def settle_stream(
     wins = 0
     bets: list[dict] = []
     for record, prediction in stream:
+        if bank <= 0:
+            continue
         winners, dividends = winner_and_dividends(record["result"])
-        best = None
-        for item in prediction["runners"]:
-            odds = item.get("win_odds_snapshot")
-            if not isinstance(odds, (int, float)) or odds <= 1.0:
-                continue
-            edge = float(item["win_probability"]) * float(odds) - 1.0
-            if best is None or edge > best["edge"]:
-                best = {"runner": item, "edge": edge, "odds": float(odds)}
-        if best is None or best["edge"] <= min_edge or bank <= 0:
-            continue
+        selected = []
         if stake_mode == "kelly":
-            fraction = kelly_fraction(best["runner"]["win_probability"], best["odds"], cap)
+            candidates = []
+            for item in prediction["runners"]:
+                odds = item.get("win_odds_snapshot")
+                if not isinstance(odds, (int, float)) or odds <= 1.0:
+                    continue
+                candidates.append({
+                    "probability": item.get("win_probability"),
+                    "decimal_odds": float(odds),
+                    "runner": item,
+                })
+            if not candidates:
+                continue
+            race_id = prediction["race_id"]
+            race_pool_size = pool_size.get(race_id) if isinstance(pool_size, dict) else pool_size
+            options = {
+                "kelly_multiplier": kelly_multiplier,
+                "min_edge": min_edge,
+                "pool_size": race_pool_size,
+                "max_pool_fraction": max_pool_fraction,
+                "unit": unit,
+            }
+            if len(candidates) == 1:
+                candidate = candidates[0]
+                outcome = stake_size(
+                    candidate["probability"],
+                    candidate["decimal_odds"],
+                    bank,
+                    max_bankroll_fraction=min(cap, max_race_fraction),
+                    **options,
+                )
+                selected = [{**candidate, **outcome}]
+            else:
+                selected = plan_race(
+                    candidates,
+                    bank,
+                    max_race_fraction=max_race_fraction,
+                    max_bankroll_fraction=cap,
+                    **options,
+                )["bets"]
         else:
-            fraction = min(cap, 1.0)
-        stake = bank * fraction
-        if stake <= 0:
+            best = None
+            for item in prediction["runners"]:
+                odds = item.get("win_odds_snapshot")
+                if not isinstance(odds, (int, float)) or odds <= 1.0:
+                    continue
+                edge = float(item["win_probability"]) * float(odds) - 1.0
+                if best is None or edge > best["edge"]:
+                    best = {"runner": item, "edge": edge, "odds": float(odds)}
+            if best is None or best["edge"] <= min_edge:
+                continue
+            stake = bank * min(cap, 1.0)
+            if stake <= 0:
+                continue
+            selected = [{
+                "status": "bet",
+                "runner": best["runner"],
+                "decimal_odds": best["odds"],
+                "edge": best["edge"],
+                "stake": stake,
+            }]
+
+        race_stake = 0.0
+        race_returned = 0.0
+        race_wins = 0
+        race_bets = []
+        for item in selected:
+            if item.get("status") != "bet":
+                continue
+            stake = float(item["stake"])
+            if stake <= 0:
+                continue
+            runner = item["runner"]
+            number = int(runner["horse_no"])
+            won = number in winners
+            odds_paid = payout_odds(dividends.get(number), item["decimal_odds"])
+            returned = stake * odds_paid if won else 0.0
+            race_stake += stake
+            race_returned += returned
+            race_wins += 1 if won else 0
+            race_bets.append({
+                "race_id": prediction["race_id"],
+                "horse_no": number,
+                "probability": round(float(runner["win_probability"]), 6),
+                "odds": round(float(item["decimal_odds"]), 4),
+                "edge": round(float(item["edge"]), 6),
+                "stake": stake,
+                "won": won,
+                "returned": round(returned, 4),
+            })
+        if not race_bets:
             continue
-        number = int(best["runner"]["horse_no"])
-        won = number in winners
-        odds_paid = payout_odds(dividends.get(number), best["odds"])
-        returned = stake * odds_paid if won else 0.0
-        bank += returned - stake
-        turnover += stake
-        profit += returned - stake
-        wins += 1 if won else 0
+        bank += race_returned - race_stake
+        turnover += race_stake
+        profit += race_returned - race_stake
+        wins += race_wins
         peak = max(peak, bank)
         if peak > 0:
             max_drawdown = max(max_drawdown, (peak - bank) / peak)
-        bets.append(
-            {
-                "race_id": prediction["race_id"],
-                "horse_no": number,
-                "probability": round(float(best["runner"]["win_probability"]), 6),
-                "odds": round(best["odds"], 4),
-                "edge": round(best["edge"], 6),
-                "stake": round(stake, 4),
-                "won": won,
-                "returned": round(returned, 4),
-            }
-        )
+        bets.extend(race_bets)
     return {
         "stake_mode": stake_mode,
         "cap": cap,
         "min_edge": min_edge,
+        "kelly_multiplier": kelly_multiplier,
+        "max_race_fraction": max_race_fraction,
+        "max_pool_fraction": max_pool_fraction,
         "bankroll_start": round(start, 4),
         "bankroll_end": round(bank, 4),
         "bets": len(bets),
@@ -122,8 +185,9 @@ def settle_stream(
         "strike_rate": round(wins / len(bets), 6) if bets else None,
         "max_drawdown": round(max_drawdown, 6),
         "policy": (
-            "Stakes use frozen probabilities and taken odds; ROI is an empirical result, "
-            "not a guarantee. Dividends are settled per HK$10 when present."
+            "Kelly stakes use the shared fractional-Kelly staking layer with per-bet, "
+            "pool and race caps. Frozen probabilities and taken odds are used; ROI is "
+            "an empirical result, not a guarantee. Dividends are settled per HK$10."
         ),
         "detail": bets[:200],
     }

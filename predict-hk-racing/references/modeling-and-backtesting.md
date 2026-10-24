@@ -180,5 +180,7 @@ plan = plan_race(bets, bankroll=10_000, max_race_fraction=0.05)
 
 - `edge = p × odds − 1`；`f* = (p × odds − 1) / (odds − 1)`。
 - 池上限用 `pool_size × max_pool_fraction`；彩池賠率已含抽水，唔需要再乘 0.825。
-- `plan_race` 會先逐注計 Kelly，總額超過 race cap 就按比例縮細再取整，並將低於最小注的注項標記 `scaled_below_minimum`。
+- `plan_race` 會先逐注計 Kelly，總額超過 race cap 就按比例縮細再取整，並將低於最小注的注項標記 `scaled_below_minimum`；總額亦唔會超過當時 bankroll。
+- `value-backtest --stake kelly` 直接用呢個共用注碼層：`--kelly-multiplier` 預設 0.25，`--max-race-fraction` 預設 0.05；同場有多個正 edge 注項時用 `plan_race`，唔再另設 full Kelly 公式。
+- `--pool-size` 只係明確輸入嘅回測假設，會套用於每場並記入報告；佢唔係由歷史資料自動觀測嘅彩池，唔好當成實績證據。
 

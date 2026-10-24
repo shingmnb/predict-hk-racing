@@ -143,7 +143,7 @@ def stake_size(
         return result
 
     result["status"] = "bet"
-    result["stake"] = round(stake, 2)
+    result["stake"] = stake
     return result
 
 
@@ -175,7 +175,7 @@ def plan_race(
         sized.append(merged)
 
     total = sum(item["stake"] for item in sized)
-    cap = float(bankroll) * max(0.0, max_race_fraction)
+    cap = float(bankroll) * max(0.0, min(1.0, max_race_fraction))
     scaled = False
     if total > cap and total > 0:
         scale = cap / total
@@ -193,16 +193,16 @@ def plan_race(
                 item["reason"] = "scaled_below_minimum"
                 item["stake"] = 0.0
             else:
-                item["stake"] = round(value, 2)
+                item["stake"] = value
         total = sum(item["stake"] for item in sized)
         scaled = True
 
     return {
         "bankroll": float(bankroll),
         "bet_count": sum(1 for item in sized if item["status"] == "bet"),
-        "total_stake": round(total, 2),
+        "total_stake": total,
         "total_exposure": round(total / float(bankroll), 4) if bankroll else None,
-        "race_cap": round(cap, 2),
+        "race_cap": cap,
         "scaled_to_race_cap": scaled,
         "bets": sized,
     }
