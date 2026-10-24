@@ -2,6 +2,14 @@
 
 所有重要變更會記錄喺呢度。版本採用 Semantic Versioning，日期採用 ISO 格式。
 
+## [0.2.0] - 2026-10-24
+
+### Added
+
+- Isotonic（PAVA）同 Platt scaling 機率校準工具，以及 10 等寬 bin ECE 指標；文件明確要求只用 out-of-fold 預測擬合校準器。
+- `fit_model` 可選時間順序 validation hold-out 及 early stopping，停止後還原最佳 epoch 係數；預設行為維持不變。
+- 校準、ECE、預設兼容性及時間序 hold-out 虛構數據測試。
+
 ## [0.1.0] - 2026-10-24
 
 ### Added
@@ -15,4 +23,5 @@
 - 虛構數據端到端測試、Skill 打包工具、Issue 與 PR 模板。
 - GitHub Actions 測試矩陣，以及 tag 觸發嘅 `.skill`／SHA-256 Release 自動化。
 
+[0.2.0]: https://github.com/shingmnb/predict-hk-racing/releases/tag/v0.2.0
 [0.1.0]: https://github.com/shingmnb/predict-hk-racing/releases/tag/v0.1.0

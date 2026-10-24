@@ -15,6 +15,7 @@
 - **概率模型**：市場去水基準、conditional logit、Plackett–Luce 位置概率近似。
 - **審計紀錄**：SQLite 保存賽前快照、預測、賽果、模型版本及評估；主要紀錄 append-only。
 - **專業回測**：expanding-window walk-forward、log loss、Brier、校準及 race-level bootstrap。
+- **機率校準與訓練控制**：isotonic／Platt scaling、ECE；可選時間順序 hold-out early stopping，並還原最佳 epoch。
 - **有門檻學習**：候選模型要跑贏市場及現任 champion 先可 promoted；否則記錄 rejected。
 - **意圖 ablation**：驗證 `intent_centered` 有冇時間外預測價值，唔好用賽果反推動機。
 
