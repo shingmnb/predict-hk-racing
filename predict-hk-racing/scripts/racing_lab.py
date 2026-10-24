@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import json
 import math
@@ -415,6 +416,154 @@ def command_import_card(args) -> dict:
     return {"race_id": race["race_id"], "snapshot_id": snapshot_id, "duplicate": False, "warnings": warnings}
 
 
+def command_import_odds(args) -> dict:
+    """Append a NEW card snapshot with updated odds (never mutates history)."""
+    payload = read_json(args.file)
+    file_race_id = payload.get("race_id")
+    if args.race_id and file_race_id and args.race_id != file_race_id:
+        raise ValueError("race_id mismatch between --race-id and the odds file")
+    race_id = args.race_id or file_race_id
+    if not race_id:
+        raise ValueError("race_id is required (flag or file)")
+
+    with connect(args.db) as db:
+        if db.execute("SELECT 1 FROM result_snapshots WHERE race_id = ? LIMIT 1", (race_id,)).fetchone():
+            raise ValueError("Result already imported for this race; refusing to back-fill odds")
+        card, base_snapshot = latest_card(db, race_id)
+        validate_card(card)
+        off_time = parse_ts(card["race"]["off_time"], "race.off_time")
+        captured = parse_ts(payload.get("captured_at", ""), "captured_at")
+        if captured > off_time:
+            raise ValueError("odds captured_at is after off_time; refusing look-ahead")
+        entries = payload.get("odds")
+        if not isinstance(entries, list) or not entries:
+            raise ValueError("odds must be a non-empty list")
+
+        runner_map = {int(r["horse_no"]): r for r in card["runners"]}
+        seen = set()
+        for entry in entries:
+            number = entry.get("horse_no")
+            if not isinstance(number, int) or isinstance(number, bool):
+                raise ValueError(f"horse_no must be an integer: {entry!r}")
+            if number in seen:
+                raise ValueError(f"duplicate horse_no in odds file: {number}")
+            seen.add(number)
+            if number not in runner_map:
+                raise ValueError(f"unknown horse_no: {number}")
+            if runner_map[number].get("scratched"):
+                raise ValueError(f"horse {number} is scratched")
+            win_odds = entry.get("win_odds")
+            if (
+                not isinstance(win_odds, (int, float))
+                or isinstance(win_odds, bool)
+                or not math.isfinite(float(win_odds))
+                or float(win_odds) <= 1.0
+            ):
+                raise ValueError(f"win_odds for horse {number} must be a finite number > 1.0")
+            place_odds = entry.get("place_odds")
+            if place_odds is not None and (
+                not isinstance(place_odds, (int, float))
+                or isinstance(place_odds, bool)
+                or not math.isfinite(float(place_odds))
+                or float(place_odds) <= 1.0
+            ):
+                raise ValueError(f"place_odds for horse {number} must be > 1.0 when provided")
+
+        updated = copy.deepcopy(card)
+        applied = []
+        for runner in updated["runners"]:
+            entry = next((e for e in entries if e.get("horse_no") == runner["horse_no"]), None)
+            if entry is None:
+                continue
+            runner["win_odds"] = float(entry["win_odds"])
+            if entry.get("place_odds") is not None:
+                runner["place_odds"] = float(entry["place_odds"])
+            applied.append(runner["horse_no"])
+
+        updated["captured_at"] = captured.isoformat()
+        updated["data_cutoff"] = captured.isoformat()
+        source = payload.get("source") or {}
+        source_id = str(source.get("source_id") or "ODDS")
+        if not any(item.get("source_id") == source_id for item in updated["sources"]):
+            updated["sources"].append({
+                "source_id": source_id,
+                "title": source.get("title") or "Odds snapshot",
+                "url": source.get("url"),
+                "retrieved_at": captured.isoformat(),
+                "official": bool(source.get("official", False)),
+            })
+        updated["odds_snapshot"] = {
+            "captured_at": captured.isoformat(),
+            "source_id": source_id,
+            "base_snapshot_id": base_snapshot,
+            "minutes_to_off": round((off_time - captured).total_seconds() / 60.0, 2),
+            "quoted_runners": len(applied),
+        }
+        validate_card(updated)
+
+        digest = payload_hash(updated)
+        duplicate = db.execute(
+            "SELECT snapshot_id FROM card_snapshots WHERE race_id = ? AND payload_hash = ? ORDER BY rowid DESC LIMIT 1",
+            (race_id, digest),
+        ).fetchone()
+        if duplicate:
+            return {
+                "race_id": race_id,
+                "snapshot_id": duplicate["snapshot_id"],
+                "duplicate": True,
+                "updated_runners": applied,
+            }
+        snapshot_id = "cs_" + uuid.uuid4().hex
+        db.execute(
+            "INSERT INTO card_snapshots VALUES (?, ?, ?, ?, ?, ?)",
+            (snapshot_id, race_id, updated["captured_at"], updated["data_cutoff"], digest, canonical(updated)),
+        )
+
+        active = [r for r in updated["runners"] if not r.get("scratched")]
+        priced = [r for r in active if isinstance(r.get("win_odds"), (int, float)) and float(r["win_odds"]) > 1.0]
+    return {
+        "race_id": race_id,
+        "snapshot_id": snapshot_id,
+        "base_snapshot_id": base_snapshot,
+        "duplicate": False,
+        "updated_runners": applied,
+        "priced_runners": len(priced),
+        "active_runners": len(active),
+        "market_completeness": round(len(priced) / len(active), 4) if active else 0.0,
+        "minutes_to_off": updated["odds_snapshot"]["minutes_to_off"],
+    }
+
+
+def command_diagnose_card(args) -> dict:
+    """Report card completeness so gaps are visible BEFORE prediction."""
+    with connect(args.db) as db:
+        if getattr(args, "race_id", None):
+            race_ids = [args.race_id]
+        else:
+            race_ids = [row["race_id"] for row in db.execute("SELECT race_id FROM races ORDER BY meeting_date, race_id")]
+        reports = []
+        for race_id in race_ids:
+            card, snapshot_id = latest_card(db, race_id)
+            active = [r for r in card["runners"] if not r.get("scratched")]
+            priced = [r for r in active if isinstance(r.get("win_odds"), (int, float)) and float(r["win_odds"]) > 1.0]
+            priced_numbers = {r["horse_no"] for r in priced}
+            optional = {
+                field: sum(1 for r in active if r.get(field) in (None, ""))
+                for field in ("jockey", "trainer", "draw", "weight_lb", "rating")
+            }
+            reports.append({
+                "race_id": race_id,
+                "snapshot_id": snapshot_id,
+                "runners": len(active),
+                "priced_runners": len(priced),
+                "market_completeness": round(len(priced) / len(active), 4) if active else 0.0,
+                "missing_odds_horse_no": [r["horse_no"] for r in active if r["horse_no"] not in priced_numbers],
+                "missing_optional_field_counts": optional,
+                "odds_snapshot": card.get("odds_snapshot"),
+            })
+    return {"races": reports}
+
+
 def command_import_result(args) -> dict:
     result = read_json(args.file)
     with connect(args.db) as db:
@@ -740,6 +889,15 @@ def build_parser() -> argparse.ArgumentParser:
                 help="Accept feature names missing from scripts/domain.py (turns off the leakage guard)",
             )
 
+    odds = sub.add_parser("import-odds", help="Append a new card snapshot with updated odds")
+    odds.add_argument("--db", required=True)
+    odds.add_argument("--file", required=True)
+    odds.add_argument("--race-id")
+
+    diagnose = sub.add_parser("diagnose-card", help="Report card completeness before predicting")
+    diagnose.add_argument("--db", required=True)
+    diagnose.add_argument("--race-id")
+
     predict = sub.add_parser("predict", help="Freeze an append-only race prediction")
     predict.add_argument("--db", required=True)
     predict.add_argument("--race-id", required=True)
@@ -817,7 +975,9 @@ def main() -> int:
         init_db(args.db)
         handlers = {
             "import-card": command_import_card,
+            "import-odds": command_import_odds,
             "import-result": command_import_result,
+            "diagnose-card": command_diagnose_card,
             "predict": command_predict,
             "evaluate": command_evaluate,
             "fit": command_fit,

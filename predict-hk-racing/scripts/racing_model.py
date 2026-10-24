@@ -665,6 +665,17 @@ def predict_card(card: dict, model: dict | None = None, model_version: str = "ma
         "data_cutoff": card["data_cutoff"],
         "place_slots": slots,
         "market_complete": market_complete,
+        "market_completeness": round(
+            sum(
+                1
+                for runner in runners
+                if isinstance(runner.get("win_odds"), (int, float))
+                and not isinstance(runner.get("win_odds"), bool)
+                and float(runner["win_odds"]) > 1.0
+            )
+            / max(1, len(runners)),
+            4,
+        ),
         "market_overround": overround,
         "probability_note": "勝出概率全場合計為 1；位置概率用 Plackett-Luce 近似，唔係派彩保證。",
         "warnings": warnings,

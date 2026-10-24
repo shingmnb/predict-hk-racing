@@ -158,6 +158,22 @@ python "<SKILL>/scripts/racing_lab.py" promote --db "racing-data/racing.db" --mo
 
 特徵註冊表喺 `scripts/domain.py`：每個特徵要寫低單位、來源同定義。加新特徵就喺 `SPECS` 加一項，順手喺 `references/modeling-and-backtesting.md` 講清楚點樣保證佢喺 `data_cutoff` 前已存在。
 
+## 賠率快照與卡片診斷
+
+```bash
+# 追加一個新快照（永不覆寫舊 snapshot）
+python "<SKILL>/scripts/racing_lab.py" import-odds \
+  --db "racing-data/racing.db" --file "racing-data/cards/odds-S1-3-T10.json"
+
+# 預測前檢查齊全度（缺賠率的馬號會列出）
+python "<SKILL>/scripts/racing_lab.py" diagnose-card \
+  --db "racing-data/racing.db" --race-id "2026-10-24-S1-3"
+```
+
+`import-odds` 會驗證：馬號存在、無重複、非退賽、賠率 > 1.0、`captured_at <= off_time`，並拒絕已匯入賽果的場次。成功後回傳 `market_completeness` 同 `minutes_to_off`。
+
+`predict` 輸出新增 `market_completeness`（0–1）；`market_complete` 仍然係嚴格布林值，只有全場齊賠率才為 `true`。
+
 ## 模型與紀錄
 
 SQLite 保存 race card、result、prediction、model、model event、evaluation。主要紀錄表禁止 update/delete；修正方法係新增快照或版本。

@@ -51,3 +51,39 @@
 - 核心馬號／場次／開跑時間有矛盾就停低核實；唔好硬出概率。
 - 缺某項特徵就用模型訓練時嘅中位數填補，並報告 coverage；唔好將缺失當 0 或當負面證據。
 - 冇意圖證據就輸出「證據不足」，分數 50、低置信；唔好靠馬名、名氣或賽果幻想動機。
+
+## 賠率攝取（HKJC）
+
+### 官方頁面
+
+| 用途 | URL 模式 |
+|---|---|
+| 獨贏／位置賠率（每分鐘更新） | `https://bet.hkjc.com/ch/racing/wp/YYYY-MM-DD/ST/1` |
+| 賽日卡（含即時賠率） | `https://bet.hkjc.com/ch/racing/home/?lang=zh&venue=st&date=YYYY-MM-DD&race=1` |
+| 越洋轉播（S1–S5） | 同一 `wp` 路徑，venue 用 `S1`（例：`/racing/wp/2026-10-24/S1/3`） |
+| 賽果 | `https://racing.hkjc.com/zh-hk/local/information/localresults?racedate=YYYY/MM/DD&Racecourse=ST&RaceNo=N` |
+
+### 建議流程
+
+1. **T-60／T-10／T-3 各抓一次**，寫成獨立 JSON（唔好覆寫舊檔）：
+
+```json
+{
+  "race_id": "2026-10-24-S1-3",
+  "captured_at": "2026-10-24T10:30:00+08:00",
+  "source": {"source_id": "HKJC-WP", "title": "HKJC 獨贏賠率", "url": "https://bet.hkjc.com/ch/racing/wp/2026-10-24/S1/3"},
+  "odds": [{"horse_no": 2, "win_odds": 2.4}, {"horse_no": 11, "win_odds": 4.8}]
+}
+```
+
+2. `import-odds --db ... --file odds.json` → 新增 card snapshot，保留 `odds_snapshot.minutes_to_off`。
+3. `diagnose-card --db ... --race-id ...` → 確認 `market_completeness == 1.0` 才預測。
+4. 有馬冇賠率就當缺口，**唔好自行估算或補飛**；寧願等下一次快照。
+
+### 紀律
+
+- 賠率係 pari-mutuel，落注會改變派彩；同一時點全場齊全才有完整去水基準。
+- `captured_at` 必須早於 `off_time`；`import-odds` 會拒絕開跑後補數，亦會拒絕已匯入賽果的場次。
+- 尊重網站限制：每次請求之間至少隔一分鐘、加 cache、唔好繞過登入／付費牆。
+- 只保存你真正讀取過的原始頁面；引用時連時間戳一齊記。
+
