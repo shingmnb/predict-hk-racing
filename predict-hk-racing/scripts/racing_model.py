@@ -323,6 +323,146 @@ def _dot(coefficients: list[float], vector: list[float]) -> float:
     return sum(a * b for a, b in zip(coefficients, vector))
 
 
+def _mean_race_logloss(beta: list[float], items: list[dict]) -> float:
+    losses = []
+    for item in items:
+        probabilities = softmax([_dot(beta, vector) for vector in item["vectors"]])
+        losses.append(-math.log(max(EPS, probabilities[item["winner_index"]])))
+    return mean(losses)
+
+
+def sigmoid(value: float) -> float:
+    """Numerically stable logistic function."""
+    if value >= 0:
+        return 1.0 / (1.0 + math.exp(-value))
+    exp_value = math.exp(value)
+    return exp_value / (1.0 + exp_value)
+
+
+def _logit(probability: float) -> float:
+    p = min(1.0 - EPS, max(EPS, probability))
+    return math.log(p / (1.0 - p))
+
+
+def isotonic_fit(scores: list[float], labels: list[int]) -> dict:
+    """Isotonic calibration with pool-adjacent-violators (PAVA).
+
+    ``scores`` must be **out-of-fold** probabilities: fitting on in-sample
+    predictions leaks the outcome and produces over-confident calibration.
+    Returns ``{"x": [...], "y": [...], "n": ...}`` where ``y`` is non-decreasing.
+    """
+    if len(scores) != len(labels):
+        raise ValueError("scores and labels must have the same length")
+    if not scores:
+        raise ValueError("at least one calibration point is required")
+    pairs = sorted(zip(scores, [1 if label else 0 for label in labels]))
+    xs: list[float] = []
+    means: list[float] = []
+    weights: list[int] = []
+    for score, label in pairs:
+        if xs and abs(score - xs[-1]) <= 1e-12:
+            weights[-1] += 1
+            means[-1] += (float(label) - means[-1]) / weights[-1]
+        else:
+            xs.append(float(score))
+            means.append(float(label))
+            weights.append(1)
+
+    blocks = [[m, float(w)] for m, w in zip(means, weights)]
+    index = 0
+    while index < len(blocks) - 1:
+        if blocks[index][0] > blocks[index + 1][0]:
+            m1, w1 = blocks[index]
+            m2, w2 = blocks[index + 1]
+            blocks[index] = [(m1 * w1 + m2 * w2) / (w1 + w2), w1 + w2]
+            del blocks[index + 1]
+            index = max(0, index - 1)
+        else:
+            index += 1
+
+    fitted: list[float] = []
+    for value, weight in blocks:
+        fitted.extend([value] * int(weight))
+    return {"x": xs, "y": fitted, "n": len(scores)}
+
+
+def isotonic_apply(model: dict, score: float) -> float:
+    """Piecewise-linear interpolation over an :func:`isotonic_fit` model."""
+    xs, ys = model["x"], model["y"]
+    if not xs:
+        raise ValueError("empty isotonic model")
+    if score <= xs[0]:
+        return ys[0]
+    if score >= xs[-1]:
+        return ys[-1]
+    low, high = 0, len(xs) - 1
+    while low < high:
+        mid = (low + high) // 2
+        if xs[mid] < score:
+            low = mid + 1
+        else:
+            high = mid
+    x0, x1 = xs[low - 1], xs[low]
+    y0, y1 = ys[low - 1], ys[low]
+    if x1 == x0:
+        return y1
+    return y0 + (y1 - y0) * (score - x0) / (x1 - x0)
+
+
+def platt_fit(
+    scores: list[float],
+    labels: list[int],
+    *,
+    iterations: int = 400,
+    learning_rate: float = 0.2,
+) -> dict:
+    """Platt scaling: fit ``p = sigmoid(a * logit(score) + b)`` by gradient descent.
+
+    As with isotonic calibration, ``scores`` should be out-of-fold predictions.
+    """
+    if len(scores) != len(labels):
+        raise ValueError("scores and labels must have the same length")
+    if not scores:
+        raise ValueError("at least one calibration point is required")
+    z = [_logit(score) for score in scores]
+    y = [1.0 if label else 0.0 for label in labels]
+    a, b = 1.0, 0.0
+    n = len(z)
+    for _ in range(iterations):
+        grad_a = grad_b = 0.0
+        for zi, yi in zip(z, y):
+            error = sigmoid(a * zi + b) - yi
+            grad_a += error * zi
+            grad_b += error
+        a -= learning_rate * grad_a / n
+        b -= learning_rate * grad_b / n
+    return {"a": a, "b": b, "n": n}
+
+
+def platt_apply(model: dict, score: float) -> float:
+    """Apply a :func:`platt_fit` model to one raw probability."""
+    return sigmoid(model["a"] * _logit(score) + model["b"])
+
+
+def expected_calibration_error(points: list[tuple[float, int]], bins: int = 10) -> float:
+    """ECE over ``(probability, outcome)`` pairs using equal-width bins."""
+    if not points:
+        raise ValueError("at least one calibration point is required")
+    buckets: list[list[tuple[float, int]]] = [[] for _ in range(bins)]
+    for probability, outcome in points:
+        index = min(bins - 1, max(0, int(probability * bins)))
+        buckets[index].append((probability, outcome))
+    total = len(points)
+    error = 0.0
+    for bucket in buckets:
+        if not bucket:
+            continue
+        confidence = mean([p for p, _ in bucket])
+        accuracy = mean([float(y) for _, y in bucket])
+        error += len(bucket) / total * abs(confidence - accuracy)
+    return error
+
+
 def fit_model(
     records: list[dict],
     feature_names: list[str],
@@ -330,8 +470,17 @@ def fit_model(
     l2: float = 0.01,
     learning_rate: float = 0.05,
     epochs: int = 300,
+    validation_fraction: float = 0.0,
+    early_stopping_patience: int = 0,
+    min_epochs: int = 20,
 ) -> dict:
-    """Fit a race-softmax (conditional logit) model with Adam and L2."""
+    """Fit a race-softmax (conditional logit) model with Adam and L2.
+
+    When ``validation_fraction > 0`` the **last** races (time order) become a
+    hold-out set; training stops once validation log loss has not improved for
+    ``early_stopping_patience`` epochs and the best epoch's coefficients are
+    restored. Defaults keep the original behaviour unchanged.
+    """
     if not feature_names:
         raise ValueError("At least one feature is required")
     if len(set(feature_names)) != len(feature_names):
@@ -370,17 +519,35 @@ def fit_model(
     adam_m = [0.0] * size
     adam_v = [0.0] * size
     race_count = len(prepared)
+    validation_items: list[dict] = []
+    train_items = prepared
+    validation_note = None
+    if validation_fraction > 0:
+        if len(prepared) < 4:
+            validation_note = "too_few_races_skipped"
+        else:
+            val_size = max(
+                1, min(len(prepared) - 2, int(round(len(prepared) * validation_fraction)))
+            )
+            train_items = prepared[:-val_size]
+            validation_items = prepared[-val_size:]
+    train_race_count = len(train_items)
+    best_validation = float("inf")
+    best_beta = None
+    best_epoch = 0
+    stale_epochs = 0
+    stopped_early = False
 
     for epoch in range(1, epochs + 1):
         gradient = [0.0] * size
-        for item in prepared:
+        for item in train_items:
             scores = [_dot(beta, vector) for vector in item["vectors"]]
             probabilities = softmax(scores)
             winner_index = item["winner_index"]
             for row_index, vector in enumerate(item["vectors"]):
                 error = probabilities[row_index] - (1.0 if row_index == winner_index else 0.0)
                 for feature_index in range(size):
-                    gradient[feature_index] += error * vector[feature_index] / race_count
+                    gradient[feature_index] += error * vector[feature_index] / train_race_count
         for feature_index in range(size):
             gradient[feature_index] += l2 * beta[feature_index]
         norm = math.sqrt(sum(g * g for g in gradient))
@@ -393,6 +560,22 @@ def fit_model(
             m_hat = adam_m[feature_index] / (1.0 - 0.9 ** epoch)
             v_hat = adam_v[feature_index] / (1.0 - 0.999 ** epoch)
             beta[feature_index] -= learning_rate * m_hat / (math.sqrt(v_hat) + 1e-8)
+
+        if validation_items and epoch >= min_epochs:
+            validation_loss = _mean_race_logloss(beta, validation_items)
+            if validation_loss < best_validation - 1e-9:
+                best_validation = validation_loss
+                best_beta = beta[:]
+                best_epoch = epoch
+                stale_epochs = 0
+            else:
+                stale_epochs += 1
+                if early_stopping_patience and stale_epochs >= early_stopping_patience:
+                    stopped_early = True
+                    break
+
+    if best_beta is not None:
+        beta = best_beta
 
     losses = []
     for item in prepared:
@@ -408,12 +591,20 @@ def fit_model(
             "l2": l2,
             "learning_rate": learning_rate,
             "epochs": epochs,
+            "validation_fraction": validation_fraction,
+            "early_stopping_patience": early_stopping_patience,
+            "min_epochs": min_epochs,
         },
         "training": {
             "race_count": race_count,
             "runner_count": sum(len(item["rows"]) for item in prepared),
             "skipped_races": skipped,
             "training_logloss": mean(losses),
+            "validation_races": len(validation_items),
+            "validation_logloss": best_validation if validation_items else None,
+            "best_epoch": best_epoch or epochs,
+            "stopped_early": stopped_early,
+            "validation_note": validation_note,
         },
     }
 
