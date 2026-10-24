@@ -13,5 +13,6 @@
 - Walk-forward 回測、log loss、Brier、校準、bootstrap 及 champion 比較。
 - 模型 `fitted`、`promoted`、`rejected` 版本事件與意圖 ablation 流程。
 - 虛構數據端到端測試、Skill 打包工具、Issue 與 PR 模板。
+- GitHub Actions 測試矩陣，以及 tag 觸發嘅 `.skill`／SHA-256 Release 自動化。
 
 [0.1.0]: https://github.com/shingmnb/predict-hk-racing/releases/tag/v0.1.0

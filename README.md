@@ -1,10 +1,12 @@
 # predict-hk-racing
 
+[![test](https://github.com/shingmnb/predict-hk-racing/actions/workflows/test.yml/badge.svg)](https://github.com/shingmnb/predict-hk-racing/actions/workflows/test.yml)
+
 香港賽馬數據驅動預測 Skill：自動搜集及核實資料、分析能力／形勢／馬房去馬意圖、輸出勝出與位置概率，再用不可覆寫紀錄、時間順序回測及模型升級門檻持續校準。
 
 > 呢個項目處理嘅「去馬」係基於公開證據嘅不確定推論，唔係內幕消息。概率唔係保證；賽馬高方差，請只用可承受損失作娛樂預算。
 
-> 發佈狀態：源碼、測試同維護文件已公開；GitHub Actions 同自動 Release 會喺 `workflow` 權限啟用後配置。
+> 發佈狀態：GitHub Actions 會自動執行測試；版本 tag 會觸發 `.skill` 打包、SHA-256 同 GitHub Release。
 
 ## 功能
 
@@ -19,7 +21,7 @@
 ## 安裝
 
 - 而家可直接使用 repo 內嘅 [`predict-hk-racing/`](predict-hk-racing/) 源文件。
-- 首個 Release 發佈後，亦可從 [Releases](https://github.com/shingmnb/predict-hk-racing/releases) 下載 `predict-hk-racing.skill`，匯入支援 `.skill` 套件嘅 agent。
+- 亦可從 [Releases](https://github.com/shingmnb/predict-hk-racing/releases) 下載 `predict-hk-racing.skill`，匯入支援 `.skill` 套件嘅 agent。
 - 完整操作指引見 [`predict-hk-racing/SKILL.md`](predict-hk-racing/SKILL.md)。
 
 ## 快速開始
@@ -49,7 +51,7 @@ python predict-hk-racing/scripts/racing_lab.py predict \
 predict-hk-racing/       # 可分發 Skill（SKILL.md、scripts、references、assets）
 tests/                   # 標準庫 unittest；全部使用虛構資料
 tools/package_skill.py   # Skill 驗證、打包及 SHA-256
-.github/workflows/       # 待權限啟用後加入：CI 測試及 tag Release
+.github/workflows/       # CI 測試及 tag Release
 .github/ISSUE_TEMPLATE/  # Bug 與功能建議
 CONTRIBUTING.md          # 維護及 PR 流程
 CHANGELOG.md             # 版本紀錄
@@ -68,7 +70,7 @@ python tools/package_skill.py --check-only
 python tools/package_skill.py --output dist
 ```
 
-採用 Semantic Versioning。CI／Release 配置啟用後，推送 `v*.*.*` tag 將會觸發測試、打包 `.skill`、產生 SHA-256 並建立 GitHub Release。詳見 [CONTRIBUTING.md](CONTRIBUTING.md)。
+採用 Semantic Versioning。推送 `v*.*.*` tag 會觸發測試、打包 `.skill`、產生 SHA-256 並建立 GitHub Release。詳見 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
 ## 數據與限制
 
