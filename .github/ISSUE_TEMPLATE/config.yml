@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 維護流程
+    url: https://github.com/shingmnb/predict-hk-racing/blob/main/CONTRIBUTING.md
+    about: 開 Issue 前先查看測試、模型證據、資料安全及 release 規則。

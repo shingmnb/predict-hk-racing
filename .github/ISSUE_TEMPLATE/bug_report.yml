@@ -1,0 +1,48 @@
+name: Bug report
+description: 報告程式、資料驗證、概率或回測問題
+title: "[Bug] "
+labels: [bug]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: 問題描述
+      description: 請講實際行為同預期行為；唔好貼秘密或私人投注紀錄。
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: 重現步驟
+      description: 提供命令、虛構最小輸入及完整錯誤訊息。
+      placeholder: "1. ...\n2. ...\n3. ..."
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Skill／release 版本
+      placeholder: v0.1.0 或 commit SHA
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: 範圍
+      options:
+        - 資料搜集／schema
+        - 意圖證據
+        - 概率模型
+        - 回測／評估
+        - 打包／安裝
+        - CI／Release
+        - 其他
+    validations:
+      required: true
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: 資料安全
+      options:
+        - label: 我已移除帳戶資料、秘密、私人投注紀錄及不可公開內容。
+          required: true

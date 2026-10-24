@@ -1,0 +1,79 @@
+{
+  "schema_version": "1.0",
+  "collection_mode": "live",
+  "captured_at": "2026-10-24T20:00:00+08:00",
+  "data_cutoff": "2026-10-24T20:00:00+08:00",
+  "race": {
+    "race_id": "2026-10-25-ST-R1",
+    "meeting_date": "2026-10-25",
+    "venue": "ST",
+    "race_no": 1,
+    "race_name": "示例賽事（請全部替換）",
+    "off_time": "2026-10-25T13:00:00+08:00",
+    "distance_m": 1200,
+    "surface": "turf",
+    "going": "good",
+    "class_name": "Class 4",
+    "place_slots": 3
+  },
+  "sources": [
+    {
+      "source_id": "S1",
+      "title": "馬會官方排位表（示例佔位）",
+      "url": "https://www.hkjc.com/",
+      "retrieved_at": "2026-10-24T20:00:00+08:00",
+      "official": true
+    }
+  ],
+  "runners": [
+    {
+      "horse_no": 1,
+      "horse_id": "EXAMPLE-01",
+      "horse_name": "示例馬甲",
+      "jockey": "示例騎師",
+      "trainer": "示例練馬師",
+      "draw": 3,
+      "weight_lb": 123,
+      "rating": 72,
+      "scratched": false,
+      "win_odds": 6.5,
+      "place_odds": 2.2,
+      "features": {
+        "career_place_rate": 0.33,
+        "cd_place_rate": 0.5,
+        "recent_finish_mean": 4.3,
+        "days_since_run": 21
+      },
+      "intent_evidence": [
+        {
+          "signal": "declared_gear_change",
+          "direction": "positive",
+          "strength": 0.3,
+          "confidence": 0.7,
+          "source_id": "S1",
+          "note": "示例：配備有改動；方向只屬候選假設，須另行回測。"
+        }
+      ]
+    },
+    {
+      "horse_no": 2,
+      "horse_id": "EXAMPLE-02",
+      "horse_name": "示例馬乙",
+      "jockey": "示例騎師二",
+      "trainer": "示例練馬師二",
+      "draw": 8,
+      "weight_lb": 118,
+      "rating": 68,
+      "scratched": false,
+      "win_odds": 9.0,
+      "place_odds": 2.8,
+      "features": {
+        "career_place_rate": 0.25,
+        "cd_place_rate": 0.2,
+        "recent_finish_mean": 6.0,
+        "days_since_run": 35
+      },
+      "intent_evidence": []
+    }
+  ]
+}

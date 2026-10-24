@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Build and package output
+dist/
+build/
+/*.skill
+
+# Local racing records and credentials
+racing-data/
+skill-test/
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+.env
+
+# OS and editors
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

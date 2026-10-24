@@ -1,0 +1,30 @@
+{
+  "schema_version": "1.0",
+  "race_id": "2026-10-25-ST-R1",
+  "recorded_at": "2026-10-25T14:00:00+08:00",
+  "sources": [
+    {
+      "source_id": "R1",
+      "title": "馬會官方賽果（示例佔位）",
+      "url": "https://www.hkjc.com/",
+      "retrieved_at": "2026-10-25T14:00:00+08:00",
+      "official": true
+    }
+  ],
+  "results": [
+    {
+      "horse_no": 1,
+      "finish_position": 2,
+      "status": "OK",
+      "win_dividend": null,
+      "place_dividend": null
+    },
+    {
+      "horse_no": 2,
+      "finish_position": 1,
+      "status": "OK",
+      "win_dividend": null,
+      "place_dividend": null
+    }
+  ]
+}

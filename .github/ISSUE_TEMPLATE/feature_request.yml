@@ -1,0 +1,33 @@
+name: Feature request
+description: 建議新資料源、特徵、模型、輸出或維護改善
+title: "[Feature] "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: 想解決嘅問題
+      description: 先講用戶場景同現有限制，唔好只寫解決方案。
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 建議方案
+      description: 包括輸入、輸出、向後兼容及失敗時點處理。
+    validations:
+      required: true
+  - type: textarea
+    id: validation
+    attributes:
+      label: 驗證方法
+      description: 模型相關建議請說明時間外回測、基準及 ablation；其他改動請說明測試。
+    validations:
+      required: true
+  - type: checkboxes
+    id: evidence
+    attributes:
+      label: 證據紀律
+      options:
+        - label: 我明白單場賽果或少量 ROI 唔足以證明新規則有效。
+          required: true
