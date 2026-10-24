@@ -99,6 +99,7 @@ def clv_report(predictions: list[dict], closing_odds: dict[str, dict]) -> dict
 ```
 
 - 每注：`clv = p_model * closing_odds - 1`（只計有 closing 的注）。
+  - ⚠️ 語義註記（19:28Z 審查提出，[待 B 拍板]）：呢條公式係「以收市賠率計嘅模型期望回報」，唔係傳統 CLV（落注價 vs 收市價比較）。B 拍板改名或重定義前，Kimi 照公式同欄位名實作，唔好自行改語義。
 - 輸出：`mean_clv`、`median_clv`、`pct_positive`、`by_odds_bucket`（1–2／2–4／4–8／8+）、`coverage`。
 - 缺 closing 的注要計入 `skipped`，唔可以靜默當 0。
 
@@ -133,9 +134,9 @@ def audit_snapshots(db_path: str, race_id: str | None = None) -> dict
 1. **Append-only**：任何 UPDATE/DELETE 觸發即失敗。
 2. **無泄漏**：`data_cutoff <= off_time`；有 result 之後拒收 card／odds。
 3. **校準只可用 OOF**：`isotonic_fit` / `platt_fit` 的 docstring 要保留警告，測試要驗證 in-sample 會被拒絕（加 `require_oof=True` 參數）。
-4. **Promotion gate**：`Δf² > 0`、logloss CI 上界 < 0、Brier 不差過市場、贏 champion，缺一不可。
+4. **Promotion gate**：`Δf² > 0`、logloss CI 上界 < 0、Brier 不差過市場、贏 champion，缺一不可。**Bootstrap 守門（#25）**：Bonferroni 調整後 CI 尾不可解（下界 index < 1，即 effective_alpha < 2/samples）→ `ci=[None,None]` + `ci_resolution_sufficient=false`，gate 一律拒絕；legacy 行缺 `ci_resolution_sufficient` 欄位同樣拒（對齊 main #24 `03f0d02a`）。
 5. **注碼**：永不超过 bankroll／單注／彩池／同場上限，且向下取整。
-6. **Q/PQ 機率**：兩條不變量（總和 = 1；邊際 = 2×place）。
+6. **Q/PQ 機率**：Q 全部 unordered pair 總和 = 1；PQ 全部 unordered pair 總和 = 3（三甲 C(3,2)=3 對）；兩者邊際同為 `Σ_j P(i,j) = 2 × P(i 入三甲)`。（唔可以一句「總和 = 1」同時套 Q 同 PQ — 19:28Z 審查修訂）
 
 ## 5. 交付順序
 
