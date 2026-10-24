@@ -1,11 +1,12 @@
 # 改進路線圖（improvement roadmap — 來自實戰系統交叉評審）
 
 > 來源：另一個實戰系統（10 個月誤差累積 hypothesis ledger + 2026-10-24 費明頓 9 場實測）嘅交叉評審。
-> 你嘅骨架（認識論紀律 + ML ops）係對嘅，以下係補血肉嘅具體改法。每份 PR 獨立可合，附實證動機 + schema 草稿 + 驗收 tests。
+> 狀態：以下係候選藍圖。外部實戰結果、引用數同文獻摘要未喺本 repo 獨立重現或核實，唔好當成已驗證優勢。藍圖編號只係規劃 ID，唔對應 GitHub PR 編號。
+> 每份藍圖都要獨立評審同驗收；實作時附 schema、時間順序測試同反證，唔代表可以全部直接合入。
 
 ---
 
-## PR 1：數據 fetch 層 — 令 racing.db 由 n=0 變有糧食
+## 藍圖 1：數據 fetch 層 — 令 racing.db 由 n=0 變有糧食
 
 **問題**：`import-card` CLI 齊全，但冇任何「由 HKJC 官方攞數」嘅 fetch 層。每次 race-card JSON 靠 agent 手動填 → 數據累積速度追唔上 conditional logit 嘅 promote 門檻。模型永遠行「市場基準」模式。
 
@@ -31,7 +32,7 @@ def fetch_result(date, venue, race_no):
 
 ---
 
-## PR 2：海外越洋轉播（S1-S4）— 每年 20+ 個海外賽日冇覆蓋
+## 藍圖 2：海外越洋轉播（S1-S4）— 每年 20+ 個海外賽日冇覆蓋
 
 **問題**：schema 得沙田/跑馬地。HKJC 每年海外越洋轉播（澳洲/英愛/日本/杜拜/美國）20+ 個賽日，全部有香港池 — 係同一個預測問題。
 
@@ -50,12 +51,12 @@ def fetch_result(date, venue, race_no):
 3. 海外 PDF 排位表結構差異：心水推介欄、馬評家精選欄、後備馬（emergency）列表 — parser 要分別處理。
 
 **實證動機（2026-10-24 費明頓 9 場）**：
-- S1-3 滿利谷瓶 G2：引擎第 2 位馬 WIN（3/3 評家共識 + 市場 top1）— 你嘅 `tipster_consensus`（PR 3）喺海外場一樣有預測力
+- S1-3 滿利谷瓶 G2：引擎第 2 位馬 WIN（3/3 評家共識 + 市場 top1）— 你嘅 `tipster_consensus`（藍圖 3）喺海外場一樣有預測力
 - 海外 NR 規則：官方匹數 ≠ 出賽數，後備補位 — 我哋試過官方 15 匹但 #16 實為正選（補位入圍）→ fetch 層要以賠率表馬數做真相，唔好信官方匹數
 
 ---
 
-## PR 3：`tipster_consensus` 特徵 — 評家共識唔係意圖證據，但係市場情緒 proxy
+## 藍圖 3：`tipster_consensus` 特徵 — 評家共識唔係意圖證據，但係市場情緒 proxy
 
 **問題**：你在 data-collection.md 將「馬評心水」完全排除（「屬意見，唔係馬房意圖證據」）— **呢個切割係啱嘅**。但你同時將佢嘅預測力都掉咗。
 
@@ -74,7 +75,7 @@ tipster_consensus = normalized_score  # 0=冇人提, 1=全體頭選
 
 ---
 
-## PR 4：`provisional` 賽日滾動修正 — 同日早場誤差餵晚場
+## 藍圖 4：`provisional` 賽日滾動修正 — 同日早場誤差餵晚場
 
 **問題**：你嘅凍結制係靚嘅審計設計，但係**單日獨立事件制**。現實：同一個賽日 9-11 場之間有結構性延續（當日場地偏差、評家集體偏向、引擎當日校準漂移）。我哋 10-21 跑馬地夜賽實證：頭 3 場誤差模式 → 修正策略 → 後 6 場 WIN2 直接命中。
 
@@ -97,7 +98,7 @@ tipster_consensus = normalized_score  # 0=冇人提, 1=全體頭選
 
 ---
 
-## PR 5：bet-structure 模塊（optional）— 用戶要求注項時先載入
+## 藍圖 5：bet-structure 模塊（optional）— 用戶要求注項時先載入
 
 **問題**：你寫「用戶冇要求注項時唔好硬塞投注組合」— 好 default。但要有一個正規模塊 respond 用戶要求，唔係臨場砌。
 
@@ -114,7 +115,7 @@ tipster_consensus = normalized_score  # 0=冇人提, 1=全體頭選
 
 ---
 
-## PR 6（最高槓桿）：數據 bridge — 歷史快照批次入庫，即刻有 200+ 場 fit
+## 藍圖 6（最高槓桿）：數據 bridge — 歷史快照批次入庫，即刻有 200+ 場 fit
 
 **問題**：你嘅 promote 門檻要測試場數樣本。由 n=0 開始自動累積要幾個月。
 
@@ -137,7 +138,7 @@ races.json + odds_r*.json（每場 10-14 匹 + 同時點全場賠率 + 賽果）
 
 ## 優先級建議
 
-| PR | 工作量 | 槓桿 | 建議次序 |
+| 藍圖 | 工作量 | 槓桿 | 建議次序 |
 |---|---|---|---|
 | 6 數據 bridge | 中 | ★★★★★（即刻有數據 fit）| 第 1 |
 | 1 fetch 層 | 中 | ★★★★（持續供糧）| 第 2 |
@@ -150,23 +151,23 @@ races.json + odds_r*.json（每場 10-14 匹 + 同時點全場賠率 + 賽果）
 
 ---
 
-# 學術文獻升級版（2026-10-24 第二輪 — 論文 backed）
+# 文獻參考與候選增量（2026-10-24 第二輪）
 
-> 來源：OpenAlex 學術檢索（market efficiency 經典系列 + 香港 ML 前例 + 2026 SOTA）。
-> 你嘅核心設計有幾個選擇啱啱獲得學術背書 — 標 ✔ 嘅係「論文話你啱」；PR 7-9 係新證據驅動嘅增量。
+> 來源：外部評審提供嘅 OpenAlex 檢索摘要（market efficiency 經典系列 + 香港 ML 前例 + 2026 SOTA）。
+> 呢啲只係研究線索，唔係「論文證明本 repo 啱」；藍圖 7-9 要核實原文，再用本 repo 數據做時間外驗證。
 
-## ✔ 學術背書（唔使改）
+## 文獻線索（仍需核實原文及本地驗證）
 
-| 你嘅設計 | 論文背書 |
+| 你嘅設計 | 文獻線索 |
 |---|---|
 | 「落飛唔好當獨立意圖證據」 | **Camerer 1998**（JCR，cites 134）：$500/$1000 落注再取消實驗 — 賠率郁但快速回復，操縱效果 shallow 而短命 → 落飛訊號本身好弱 |
 | 「市場基準做比較線」 | **Asch, Malkiel & Quandt 1981**（cites 248）：win pool 接近有效 — beat 市場唔係應有假設 |
 | 「樣本不足退回市場基準」 | **Thaler & Ziemba 1988**（cites 621）：parimutuel 市場異象系統性存在但細 — 未有驗證優勢前市場基準係理性起點 |
 | 凍結版本 + 時間外回測 | walk-forward 係量化共識；1984 Ziemba 模擬已用嚴格時間外樣本 |
 
-## PR 7：Place/Show pool 低效掃描器（學術最強槓桿 ★★★★）
+## 藍圖 7：Place/Show pool 低效掃描器（候選假設）
 
-**證據**：**Asch, Malkiel & Quandt 1982「Racetrack betting and informed behavior」**（cites 150）+ **Ziemba 1984「Dr. Z」模擬** — win pool 高效但 **place/show pool 有系統性低效**：大熱馬嘅 place/show 價成日被過度擠壓（公眾湧去買冷門 place），令「大熱 place」長期 +EV。
+**候選假設**：據外部摘要，**Asch, Malkiel & Quandt 1982「Racetrack betting and informed behavior」**（cites 150）+ **Ziemba 1984「Dr. Z」模擬**曾報告 place/show pool 低效。呢種低效喺香港是否存在、邊一類馬有正 EV，必須由本地時間外數據驗證。
 
 **建議改法**：你已有 Plackett–Luce place 概率 — 加一個掃描函數：
 
@@ -178,15 +179,15 @@ def place_value_scan(place_probs, place_odds_snapshot):
 ```
 
 - 需要 fetch 層加 place odds（同 WIN 快照同一時點 — 你嘅規則直接延伸）
-- 同半冷 place 投注策略互補：掃描器會同時捉「大熱 place 被擠壓」同「半冷 place 被低估」兩邊
+- 掃描器可以同時檢驗「大熱 place 被擠壓」同「半冷 place 被低估」兩類假設，唔預設任何一類有效。
 
-## PR 8：Ensemble committee（香港前例 ★★★）
+## 藍圖 8：Ensemble committee（香港前例 ★★★）
 
 **證據**：**「A SVM-Based committee machine for prediction of Hong Kong horse racing」2017**（cites 11）— 3 年 HKJC 數據訓練 committee machine，香港場直接前例：**ensemble 優於單模型**。
 
 **建議改法**：conditional logit（你已有）+ gradient boosting（LightGBM，處理非線性互動：檔位×路程×場地）兩路並行 → 簡單加權融合。你嘅 promote 門檻機制照守 — champion 對象由「市場基準」升級做「ensemble vs 單 logit vs 市場」三方。
 
-## PR 9：Favourite-longshot bias 校準層（經典異象 ★★★）
+## 藍圖 9：Favourite-longshot bias 校準層（經典異象 ★★★）
 
 **證據**：**Thaler & Ziemba 1988** + **Sobel & Raines 1997**（cites 120）— parimutuel 市場 favourite-longshot bias 穩定存在：大熱真實勝率高過市場隱含、大冷低過隱含。
 
@@ -205,9 +206,9 @@ def flb_correction(p_market_normalized, flb_params):
 
 | 階段 | 內容 | 觸發條件 |
 |---|---|---|
-| 而家 | PR 6 bridge + PR 1 fetch（數據地基）| 即刻 |
-| n ≥ 100 場 | PR 3 tipster + PR 7 place pool 掃描 | 有特徵數據 |
-| n ≥ 300 場 | PR 8 ensemble + PR 9 FLB 校準 | 樣本支持非線性 |
+| 而家 | 藍圖 6 bridge + 藍圖 1 fetch（數據地基）| 即刻 |
+| n ≥ 100 場 | 藍圖 3 tipster + 藍圖 7 place pool 掃描 | 有特徵數據 |
+| n ≥ 300 場 | 藍圖 8 ensemble + 藍圖 9 FLB 校準 | 樣本支持非線性 |
 
 ## 未採用嘅 SOTA（記錄在案）
 
