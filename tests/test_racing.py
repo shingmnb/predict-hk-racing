@@ -159,6 +159,24 @@ class ModelUnitTests(unittest.TestCase):
         self.assertIsNone(gain["delta"])
         self.assertEqual(gain["ci95"], [None, None])
 
+    def test_information_gain_matches_pseudo_r2_difference_and_alignment(self):
+        market = [
+            {"race_id": "A", "logloss": 1.0, "runner_count": 5},
+            {"race_id": "B", "logloss": 2.0, "runner_count": 20},
+        ]
+        candidate = [
+            {"race_id": "A", "logloss": 0.8, "runner_count": 5},
+            {"race_id": "B", "logloss": 1.9, "runner_count": 20},
+        ]
+        gain = information_gain_vs_market(candidate, market, samples=0)
+        expected = gain["candidate_pseudo_r2"] - gain["market_pseudo_r2"]
+        self.assertAlmostEqual(gain["delta"], expected)
+        self.assertAlmostEqual(gain["delta"], 0.06514417228548774)
+
+        misaligned = information_gain_vs_market(candidate, list(reversed(market)), samples=0)
+        self.assertIsNone(misaligned["delta"])
+        self.assertEqual(misaligned["race_count"], 0)
+
     def test_intent_is_shrunk_and_missing_is_unknown(self):
         missing = assess_intent({"intent_evidence": []})
         self.assertEqual(missing["score"], 50)

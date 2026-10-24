@@ -30,7 +30,8 @@ gain["delta"], gain["ci95"]              # Δf² 同 95% bootstrap 區間
 ```
 
 - `f² = 0`：同隨機均勻猜測一樣；`f² = 1`：完美。
-- Benter 的實戰數字：公開賠率 0.1218、基本面模型 0.1245、兩者組合 0.1396 → **Δf² = 0.0178** 才係真正可下注的 edge。
+- Benter 的實戰數字：公開賠率 0.1218、基本面模型 0.1245、兩者組合 0.1396 → **Δf² = 0.0178** 係額外解釋力指標，唔係保證可下注或正 ROI。
+- `delta` 定義係 `candidate_pseudo_r2 - market_pseudo_r2`；輸入必須按同一 `race_id` 順序逐場對齊，bootstrap 亦以場次為單位配對重抽。
 - 每個賽事 row 必須有 `runner_count`（`evaluate_race` 已加），因為 null model 的 log loss 係 `log(出賽馬數)`。
 - 推廣 gate 預設只**報告** Δf²；加 `--require-information-gain` 才會把 `Δf² > 0` 變成一條硬性條件（保持舊行為）。
 

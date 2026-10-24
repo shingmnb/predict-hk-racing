@@ -743,12 +743,11 @@ def information_gain_vs_market(
     samples: int = 1000,
     seed: int = 20261024,
 ) -> dict:
-    """Δf² (Benter 1994): how much information the model adds over the market.
+    """Δf²: candidate pseudo-R² minus market pseudo-R² on aligned races.
 
-    ``delta > 0`` means the candidate explains variance that the de-vigged
-    market baseline does not. A positive point estimate alone is not enough —
-    the bootstrap CI must exclude zero before promoting (see
-    ``promotion_gate.information_gain_ci95_excludes_zero``).
+    Rows must be paired in the same order and, when present, have matching
+    ``race_id`` and ``runner_count`` values. The point estimate and bootstrap
+    confidence interval are reported separately for the promotion policy.
     """
     import random
 
@@ -762,27 +761,39 @@ def information_gain_vs_market(
     if not candidate_rows or len(candidate_rows) != len(market_rows):
         return empty
 
-    deltas = []
-    for candidate, market in zip(candidate_rows, market_rows):
-        runner_count = int(candidate.get("runner_count") or market.get("runner_count") or 2)
-        scale = math.log(max(2, runner_count))
-        deltas.append(-(candidate["logloss"] - market["logloss"]) / scale)
+    pairs = list(zip(candidate_rows, market_rows))
+    for candidate, market in pairs:
+        if candidate.get("race_id") != market.get("race_id"):
+            return empty
+        candidate_count = candidate.get("runner_count")
+        market_count = market.get("runner_count")
+        if candidate_count is not None and market_count is not None:
+            if int(candidate_count) != int(market_count):
+                return empty
 
-    observed = mean(deltas)
-    if len(deltas) == 1 or samples <= 0:
+    candidate_f2 = pseudo_r2(candidate_rows)
+    market_f2 = pseudo_r2(market_rows)
+    observed = candidate_f2 - market_f2
+    if len(pairs) == 1 or samples <= 0:
         ci95 = [None, None]
     else:
         rng = random.Random(seed)
-        n = len(deltas)
-        estimates = sorted(mean(deltas[rng.randrange(n)] for _ in range(n)) for _ in range(samples))
+        n = len(pairs)
+        estimates = []
+        for _ in range(samples):
+            indices = [rng.randrange(n) for _ in range(n)]
+            resampled_candidate = [pairs[index][0] for index in indices]
+            resampled_market = [pairs[index][1] for index in indices]
+            estimates.append(pseudo_r2(resampled_candidate) - pseudo_r2(resampled_market))
+        estimates.sort()
         ci95 = [estimates[int(0.025 * samples)], estimates[max(0, int(0.975 * samples) - 1)]]
 
     return {
-        "candidate_pseudo_r2": pseudo_r2(candidate_rows),
-        "market_pseudo_r2": pseudo_r2(market_rows),
+        "candidate_pseudo_r2": candidate_f2,
+        "market_pseudo_r2": market_f2,
         "delta": observed,
         "ci95": ci95,
-        "race_count": len(deltas),
+        "race_count": len(pairs),
     }
 
 
