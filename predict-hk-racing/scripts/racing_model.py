@@ -715,6 +715,85 @@ def metric_row(card: dict, result: dict, prediction: dict) -> dict | None:
         "winner_probability": winner_item["win_probability"],
         "place_brier": mean(place_errors) if place_errors else None,
         "calibration": calibration,
+        "runner_count": len(by_horse),
+    }
+
+
+def pseudo_r2(rows: list[dict]) -> float | None:
+    """McFadden pseudo-R²: ``1 - mean_logloss / mean_log(runners)``.
+
+    The denominator is the log loss of a uniform model over each race's field
+    size, i.e. the "knows nothing" benchmark. ``f² = 1`` is perfect, ``0`` is
+    no better than picking uniformly at random. Benter (1994) uses this to
+    measure how much a model explains relative to the betting public.
+    """
+    if not rows:
+        return None
+    logloss = mean(row["logloss"] for row in rows)
+    null_logloss = mean(math.log(max(2, int(row.get("runner_count") or 2))) for row in rows)
+    if null_logloss <= 0:
+        return None
+    return 1.0 - logloss / null_logloss
+
+
+def information_gain_vs_market(
+    candidate_rows: list[dict],
+    market_rows: list[dict],
+    *,
+    samples: int = 1000,
+    seed: int = 20261024,
+) -> dict:
+    """Δf²: candidate pseudo-R² minus market pseudo-R² on aligned races.
+
+    Rows must be paired in the same order and, when present, have matching
+    ``race_id`` and ``runner_count`` values. The point estimate and bootstrap
+    confidence interval are reported separately for the promotion policy.
+    """
+    import random
+
+    empty = {
+        "candidate_pseudo_r2": None,
+        "market_pseudo_r2": None,
+        "delta": None,
+        "ci95": [None, None],
+        "race_count": 0,
+    }
+    if not candidate_rows or len(candidate_rows) != len(market_rows):
+        return empty
+
+    pairs = list(zip(candidate_rows, market_rows))
+    for candidate, market in pairs:
+        if candidate.get("race_id") != market.get("race_id"):
+            return empty
+        candidate_count = candidate.get("runner_count")
+        market_count = market.get("runner_count")
+        if candidate_count is not None and market_count is not None:
+            if int(candidate_count) != int(market_count):
+                return empty
+
+    candidate_f2 = pseudo_r2(candidate_rows)
+    market_f2 = pseudo_r2(market_rows)
+    observed = candidate_f2 - market_f2
+    if len(pairs) == 1 or samples <= 0:
+        ci95 = [None, None]
+    else:
+        rng = random.Random(seed)
+        n = len(pairs)
+        estimates = []
+        for _ in range(samples):
+            indices = [rng.randrange(n) for _ in range(n)]
+            resampled_candidate = [pairs[index][0] for index in indices]
+            resampled_market = [pairs[index][1] for index in indices]
+            estimates.append(pseudo_r2(resampled_candidate) - pseudo_r2(resampled_market))
+        estimates.sort()
+        ci95 = [estimates[int(0.025 * samples)], estimates[max(0, int(0.975 * samples) - 1)]]
+
+    return {
+        "candidate_pseudo_r2": candidate_f2,
+        "market_pseudo_r2": market_f2,
+        "delta": observed,
+        "ci95": ci95,
+        "race_count": len(pairs),
     }
 
 

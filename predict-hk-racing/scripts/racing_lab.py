@@ -27,6 +27,7 @@ from domain import (  # noqa: E402
 )
 from racing_model import (  # noqa: E402
     bootstrap_logloss_difference,
+    information_gain_vs_market,
     fit_model,
     metric_row,
     predict_card,
@@ -625,6 +626,9 @@ def command_backtest(args) -> dict:
         candidate_summary = summarize_rows(candidate_rows)
         baseline_summary = summarize_rows(baseline_rows)
         comparison = bootstrap_logloss_difference(candidate_rows, baseline_rows, samples=args.bootstrap)
+        information_gain = information_gain_vs_market(
+            candidate_rows, baseline_rows, samples=args.bootstrap
+        )
 
         champion_version = latest_promoted(db)
         champion_summary = None
@@ -658,6 +662,13 @@ def command_backtest(args) -> dict:
                 and champion_ci_upper is not None
                 and champion_ci_upper < 0
             )
+        information_gain_positive = bool(
+            information_gain.get("delta") is not None and information_gain["delta"] > 0
+        )
+        information_gain_significant = bool(
+            information_gain["ci95"][0] is not None and information_gain["ci95"][0] > 0
+        )
+        require_information_gain = bool(getattr(args, "require_information_gain", False))
         gate = {
             "min_test_races_required": args.min_test_races,
             "enough_test_races": enough,
@@ -665,7 +676,17 @@ def command_backtest(args) -> dict:
             "brier_not_worse_than_market": brier_not_worse,
             "logloss_improvement_ci95_excludes_zero": significant,
             "beats_current_champion": beats_champion,
-            "eligible": enough and beats_baseline and brier_not_worse and significant and beats_champion,
+            "information_gain_required": require_information_gain,
+            "information_gain_positive": information_gain_positive,
+            "information_gain_ci95_excludes_zero": information_gain_significant,
+            "eligible": (
+                enough
+                and beats_baseline
+                and brier_not_worse
+                and significant
+                and beats_champion
+                and (information_gain_positive if require_information_gain else True)
+            ),
         }
         report = {
             "kind": "walk-forward-backtest-v1",
@@ -683,6 +704,7 @@ def command_backtest(args) -> dict:
             "candidate": candidate_summary,
             "market_baseline": baseline_summary,
             "candidate_minus_baseline_logloss": comparison,
+            "information_gain_vs_market": information_gain,
             "champion": champion_summary,
             "candidate_minus_champion_logloss": champion_comparison,
             "promotion_gate": gate,
@@ -785,6 +807,11 @@ def build_parser() -> argparse.ArgumentParser:
     backtest.add_argument("--model-version", required=True)
     backtest.add_argument("--min-train-races", type=int, default=30)
     backtest.add_argument("--min-test-races", type=int, default=50)
+    backtest.add_argument(
+        "--require-information-gain",
+        action="store_true",
+        help="gate 加一條：Δf² 必須 > 0（Benter 1994），預設關閉以保持舊行為",
+    )
     backtest.add_argument("--refit-every", type=int, default=5)
     backtest.add_argument("--test-after", help="Inclusive YYYY-MM-DD")
     backtest.add_argument("--test-before", help="Exclusive YYYY-MM-DD")

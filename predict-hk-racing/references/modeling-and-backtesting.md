@@ -17,6 +17,26 @@
 
 未夠歷史樣本時，輸出市場基準、意圖證據及定性形勢，明確標示「未有已驗證模型優勢」。唔好用自創權重假裝精準 AI 概率。
 
+## 資訊增益 Δf²（Benter 1994）
+
+`logloss 好過市場` 只證明校準較好，唔證明有 edge。Benter 用 **McFadden pseudo-R²** 量度「解釋力」，再用差值量度模型比市場多知道幾多：
+
+```python
+from racing_model import pseudo_r2, information_gain_vs_market
+
+f2 = pseudo_r2(rows)                     # 1 - mean_logloss / mean_log(runners)
+gain = information_gain_vs_market(candidate_rows, market_rows, samples=1000)
+gain["delta"], gain["ci95"]              # Δf² 同 95% bootstrap 區間
+```
+
+- `f² = 0`：同隨機均勻猜測一樣；`f² = 1`：完美。
+- Benter 的實戰數字：公開賠率 0.1218、基本面模型 0.1245、兩者組合 0.1396 → **Δf² = 0.0178** 係額外解釋力指標，唔係保證可下注或正 ROI。
+- `delta` 定義係 `candidate_pseudo_r2 - market_pseudo_r2`；輸入必須按同一 `race_id` 順序逐場對齊，bootstrap 亦以場次為單位配對重抽。
+- 每個賽事 row 必須有 `runner_count`（`evaluate_race` 已加），因為 null model 的 log loss 係 `log(出賽馬數)`。
+- 推廣 gate 預設只**報告** Δf²；加 `--require-information-gain` 才會把 `Δf² > 0` 變成一條硬性條件（保持舊行為）。
+
+> 注意：Δf² 係相對市場的資訊優勢，唔等於 ROI。要賺錢仍然要過抽水（香港 Win/Place/Q/QP 17.5%）。
+
 ## 機率校準層（isotonic / Platt）
 
 **去水 ≠ 校準。** Shin 只係移除書商水位，模型輸出仍然可能系統性過度自信或不足。校準層負責把 raw probability 映射到實際命中率。
