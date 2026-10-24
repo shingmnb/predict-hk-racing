@@ -17,6 +17,7 @@ SCRIPTS = ROOT / "predict-hk-racing" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 from domain import derive_place_slots, quote_supported  # noqa: E402
 from decision import kelly_fraction, payout_odds  # noqa: E402
+from staking import edge, kelly_fraction, plan_race, stake_size  # noqa: E402
 from racing_model import (  # noqa: E402
     assess_intent,
     expected_calibration_error,
@@ -189,6 +190,68 @@ class ModelUnitTests(unittest.TestCase):
         self.assertGreater(positive["score"], 50)
         self.assertLess(positive["score"], 100)
         self.assertLess(positive["confidence"], 1.0)
+
+
+class StakingUnitTests(unittest.TestCase):
+    def test_edge_and_full_kelly_known_values(self):
+        self.assertAlmostEqual(edge(0.2, 6.0), 0.2)
+        self.assertAlmostEqual(kelly_fraction(0.2, 6.0), 0.04)
+        self.assertEqual(kelly_fraction(0.1, 6.0), 0.0)  # 負 edge → 0
+        self.assertIsNone(edge(0.0, 6.0))
+        self.assertIsNone(edge(0.5, 1.0))
+
+    def test_stake_skips_below_min_edge(self):
+        outcome = stake_size(0.15, 6.0, 10_000)
+        self.assertEqual(outcome["status"], "skip")
+        self.assertEqual(outcome["reason"], "edge_below_threshold")
+        self.assertEqual(outcome["stake"], 0.0)
+
+    def test_fractional_kelly_applied(self):
+        outcome = stake_size(0.2, 6.0, 10_000, kelly_multiplier=0.25)
+        # full Kelly 4% × 0.25 = 1% of bankroll = 100
+        self.assertEqual(outcome["status"], "bet")
+        self.assertAlmostEqual(outcome["full_kelly"], 0.04)
+        self.assertAlmostEqual(outcome["stake"], 100.0)
+
+    def test_max_bankroll_fraction_caps_stake(self):
+        outcome = stake_size(0.5, 3.0, 10_000, kelly_multiplier=1.0, max_bankroll_fraction=0.005)
+        self.assertEqual(outcome["status"], "bet")
+        self.assertLessEqual(outcome["stake"], 50.0)
+
+    def test_pool_cap_limits_stake(self):
+        outcome = stake_size(
+            0.4, 4.0, 1_000_000, kelly_multiplier=1.0, pool_size=50_000, max_pool_fraction=0.001
+        )
+        self.assertAlmostEqual(outcome["caps"]["pool"], 50.0)
+        self.assertAlmostEqual(outcome["stake"], 50.0)
+
+    def test_stake_floored_to_unit(self):
+        outcome = stake_size(0.2, 6.0, 9_700, kelly_multiplier=0.25, unit=10.0)
+        self.assertEqual(outcome["stake"] % 10, 0)
+        self.assertLessEqual(outcome["stake"], 97)
+
+    def test_minimum_stake_and_invalid_bankroll(self):
+        tiny = stake_size(0.2, 6.0, 100, kelly_multiplier=0.25, unit=10.0)
+        self.assertEqual(tiny["status"], "skip")
+        self.assertEqual(tiny["reason"], "stake_below_minimum")
+        bad = stake_size(0.2, 6.0, 0)
+        self.assertEqual(bad["reason"], "invalid_bankroll")
+
+    def test_plan_race_scales_to_total_exposure_cap(self):
+        bets = [
+            {"probability": 0.3, "decimal_odds": 4.0, "horse_no": number}
+            for number in (1, 2, 3)
+        ]
+        plan = plan_race(bets, 10_000, max_race_fraction=0.02, kelly_multiplier=1.0)
+        self.assertTrue(plan["scaled_to_race_cap"])
+        self.assertLessEqual(plan["total_stake"], plan["race_cap"])
+        self.assertEqual(plan["bet_count"], 3)
+        self.assertTrue(all(item["stake"] % 10 == 0 for item in plan["bets"]))
+
+    def test_plan_race_preserves_bookkeeping(self):
+        plan = plan_race([{"probability": 0.3, "decimal_odds": 4.0, "horse_no": 7}], 10_000)
+        self.assertEqual(plan["bets"][0]["horse_no"], 7)
+        self.assertEqual(plan["bets"][0]["status"], "bet")
 
 
 class PipelineIntegrationTests(unittest.TestCase):
