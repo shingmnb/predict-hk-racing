@@ -174,7 +174,9 @@ races.json + odds_r*.json（每場 10-14 匹 + 同時點全場賠率 + 賽果）
 ```python
 def place_value_scan(place_probs, place_odds_snapshot):
     """對每匹：P(place|PL) vs 1/place_odds 去水 → gap 排序
-    觸發條件：gap > 歷史去水偏差 + 交易成本（place pool takeout ~17.5% HK）"""
+    觸發條件：gap > 歷史去水偏差 + 交易成本
+    （takeout：以 HKJC 官方 place 池抽水率為準 — ≠ WIN 池 17.5%；
+    T-60 實測時核實官方 takeout 表先寫入 constants，唔寫死喺掃描器。見 issue #22）"""
     # 重點掃描對象：市場 top1-3 大熱（Dr. Z 經典位）
 ```
 
