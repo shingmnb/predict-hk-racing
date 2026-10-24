@@ -15,7 +15,13 @@ sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "predict-hk-racing" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
-from racing_model import assess_intent, market_probabilities, place_probabilities  # noqa: E402
+from racing_model import (  # noqa: E402
+    assess_intent,
+    market_probabilities,
+    pair_probabilities,
+    place_probabilities,
+    shin_probabilities,
+)
 
 CLI = SCRIPTS / "racing_lab.py"
 
@@ -48,6 +54,42 @@ class ModelUnitTests(unittest.TestCase):
                 self.assertAlmostEqual(sum(place), slots)
                 self.assertTrue(all(0 < value < 1 for value in place))
                 self.assertEqual(place, sorted(place, reverse=True))
+
+    def test_shin_devig_sums_to_one_and_reduces_favourite_bias(self):
+        runners = [
+            {"horse_no": 1, "win_odds": 1.8},
+            {"horse_no": 2, "win_odds": 3.5},
+            {"horse_no": 3, "win_odds": 7.0},
+            {"horse_no": 4, "win_odds": 10.0},
+        ]
+        normalized, complete, _ = market_probabilities(runners, method="normalized")
+        shin, complete_shin, _ = market_probabilities(runners, method="shin")
+        self.assertTrue(complete and complete_shin)
+        self.assertAlmostEqual(sum(shin.values()), 1.0, places=9)
+        # Shin 修正 longshot bias: 大熱機率調高、冷門調低
+        self.assertGreater(shin[1], normalized[1])
+        self.assertLess(shin[4], normalized[4])
+
+    def test_shin_handles_fair_book(self):
+        fair = shin_probabilities([0.5, 0.25, 0.25])  # book == 1.0
+        self.assertAlmostEqual(sum(fair), 1.0, places=9)
+        self.assertAlmostEqual(fair[0], 0.5, places=9)
+
+    def test_pair_probabilities_quinella_sums_to_one(self):
+        win = [0.4, 0.25, 0.15, 0.1, 0.1]
+        pairs = pair_probabilities(win, slots=2)
+        self.assertEqual(len(pairs), 10)
+        self.assertAlmostEqual(sum(pairs.values()), 1.0, places=9)
+        self.assertTrue(all(0.0 <= value <= 1.0 for value in pairs.values()))
+
+    def test_pair_probabilities_place_marginals_match_place_probabilities(self):
+        win = [0.4, 0.25, 0.15, 0.1, 0.1]
+        pairs = pair_probabilities(win, slots=3)
+        place = place_probabilities(win, 3)
+        for i in range(len(win)):
+            marginal = sum(p for (a, b), p in pairs.items() if a == i or b == i)
+            # 每個入三甲的馬會出現在 2 個 pair 之中
+            self.assertAlmostEqual(marginal, 2.0 * place[i], places=9)
 
     def test_intent_is_shrunk_and_missing_is_unknown(self):
         missing = assess_intent({"intent_evidence": []})
