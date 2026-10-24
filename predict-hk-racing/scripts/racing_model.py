@@ -742,20 +742,25 @@ def information_gain_vs_market(
     *,
     samples: int = 1000,
     seed: int = 20261024,
+    alpha: float = 0.05,
 ) -> dict:
     """Δf²: candidate pseudo-R² minus market pseudo-R² on aligned races.
 
     Rows must be paired in the same order and, when present, have matching
-    ``race_id`` and ``runner_count`` values. The point estimate and bootstrap
-    confidence interval are reported separately for the promotion policy.
+    ``race_id`` and ``runner_count`` values. ``ci95`` retains the historical
+    unadjusted interval; ``ci`` uses ``alpha`` for the promotion policy.
     """
     import random
 
+    if not 0 < alpha < 1:
+        raise ValueError("alpha must be between 0 and 1")
     empty = {
         "candidate_pseudo_r2": None,
         "market_pseudo_r2": None,
         "delta": None,
         "ci95": [None, None],
+        "ci": [None, None],
+        "alpha": alpha,
         "race_count": 0,
     }
     if not candidate_rows or len(candidate_rows) != len(market_rows):
@@ -776,6 +781,7 @@ def information_gain_vs_market(
     observed = candidate_f2 - market_f2
     if len(pairs) == 1 or samples <= 0:
         ci95 = [None, None]
+        ci = [None, None]
     else:
         rng = random.Random(seed)
         n = len(pairs)
@@ -787,12 +793,18 @@ def information_gain_vs_market(
             estimates.append(pseudo_r2(resampled_candidate) - pseudo_r2(resampled_market))
         estimates.sort()
         ci95 = [estimates[int(0.025 * samples)], estimates[max(0, int(0.975 * samples) - 1)]]
+        ci = [
+            estimates[int((alpha / 2) * samples)],
+            estimates[max(0, int((1 - alpha / 2) * samples) - 1)],
+        ]
 
     return {
         "candidate_pseudo_r2": candidate_f2,
         "market_pseudo_r2": market_f2,
         "delta": observed,
         "ci95": ci95,
+        "ci": ci,
+        "alpha": alpha,
         "race_count": len(pairs),
     }
 
@@ -828,27 +840,50 @@ def summarize_rows(rows: list[dict]) -> dict:
 
 
 def bootstrap_logloss_difference(
-    candidate_rows: list[dict], baseline_rows: list[dict], *, samples: int = 1000, seed: int = 20261024
+    candidate_rows: list[dict],
+    baseline_rows: list[dict],
+    *,
+    samples: int = 1000,
+    seed: int = 20261024,
+    alpha: float = 0.05,
 ) -> dict:
-    """Percentile bootstrap over races for candidate minus baseline log loss."""
+    """Percentile bootstrap for candidate minus baseline log loss.
+
+    ``ci95`` retains the historical unadjusted interval; ``ci`` uses ``alpha``.
+    """
     import random
 
+    if not 0 < alpha < 1:
+        raise ValueError("alpha must be between 0 and 1")
     if not candidate_rows or len(candidate_rows) != len(baseline_rows):
-        return {"difference": None, "ci95": [None, None]}
+        return {"difference": None, "ci95": [None, None], "ci": [None, None], "alpha": alpha}
     differences = [c["logloss"] - b["logloss"] for c, b in zip(candidate_rows, baseline_rows)]
     observed = mean(differences)
     if len(differences) == 1 or samples <= 0:
-        return {"difference": observed, "ci95": [None, None]}
+        return {
+            "difference": observed,
+            "ci95": [None, None],
+            "ci": [None, None],
+            "alpha": alpha,
+        }
     rng = random.Random(seed)
     estimates = []
     n = len(differences)
     for _ in range(samples):
         estimates.append(mean(differences[rng.randrange(n)] for _ in range(n)))
     estimates.sort()
-    low = estimates[int(0.025 * (len(estimates) - 1))]
-    high = estimates[int(0.975 * (len(estimates) - 1))]
+    ci95 = [
+        estimates[int(0.025 * (len(estimates) - 1))],
+        estimates[int(0.975 * (len(estimates) - 1))],
+    ]
+    ci = [
+        estimates[int((alpha / 2) * (len(estimates) - 1))],
+        estimates[int((1 - alpha / 2) * (len(estimates) - 1))],
+    ]
     return {
         "difference": observed,
-        "ci95": [low, high],
+        "ci95": ci95,
+        "ci": ci,
+        "alpha": alpha,
         "interpretation": "負數代表候選模型 log loss 較低；區間跨 0 即改善未明朗。",
     }

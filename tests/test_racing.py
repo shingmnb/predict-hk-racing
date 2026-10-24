@@ -20,6 +20,7 @@ from decision import payout_odds, settle_stream  # noqa: E402
 from staking import edge, kelly_fraction, plan_race, stake_size  # noqa: E402
 from racing_model import (  # noqa: E402
     assess_intent,
+    bootstrap_logloss_difference,
     expected_calibration_error,
     fit_model,
     information_gain_vs_market,
@@ -33,6 +34,7 @@ from racing_model import (  # noqa: E402
     pseudo_r2,
     shin_probabilities,
 )
+from racing_lab import promotion_eligible  # noqa: E402
 
 CLI = SCRIPTS / "racing_lab.py"
 
@@ -178,6 +180,34 @@ class ModelUnitTests(unittest.TestCase):
         misaligned = information_gain_vs_market(candidate, list(reversed(market)), samples=0)
         self.assertIsNone(misaligned["delta"])
         self.assertEqual(misaligned["race_count"], 0)
+        self.assertEqual(misaligned["ci"], [None, None])
+
+    def test_bootstrap_intervals_preserve_ci95_and_apply_alpha(self):
+        market_losses = [0.7, 0.4, 0.8, 0.5, 0.6, 0.9]
+        candidate_losses = [0.5, 0.5, 0.6, 0.55, 0.3, 1.1]
+        market = [
+            {"race_id": str(index), "logloss": loss, "runner_count": 10}
+            for index, loss in enumerate(market_losses)
+        ]
+        candidate = [
+            {"race_id": str(index), "logloss": loss, "runner_count": 10}
+            for index, loss in enumerate(candidate_losses)
+        ]
+        for function in (bootstrap_logloss_difference, information_gain_vs_market):
+            with self.subTest(function=function.__name__):
+                default = function(candidate, market, samples=200)
+                adjusted = function(candidate, market, samples=200, alpha=0.025)
+                self.assertEqual(default["alpha"], 0.05)
+                self.assertEqual(default["ci"], default["ci95"])
+                self.assertEqual(adjusted["ci95"], default["ci95"])
+                self.assertEqual(adjusted["alpha"], 0.025)
+                self.assertLessEqual(adjusted["ci"][0], default["ci"][0])
+                self.assertGreaterEqual(adjusted["ci"][1], default["ci"][1])
+                with self.assertRaises(ValueError):
+                    function(candidate, market, samples=10, alpha=0)
+        empty = bootstrap_logloss_difference([], [])
+        self.assertEqual(empty["ci95"], [None, None])
+        self.assertEqual(empty["ci"], [None, None])
 
     def test_intent_is_shrunk_and_missing_is_unknown(self):
         missing = assess_intent({"intent_evidence": []})
@@ -190,6 +220,83 @@ class ModelUnitTests(unittest.TestCase):
         self.assertGreater(positive["score"], 50)
         self.assertLess(positive["score"], 100)
         self.assertLess(positive["confidence"], 1.0)
+
+
+class PromotionGateUnitTests(unittest.TestCase):
+    @staticmethod
+    def eligible_gate():
+        return {
+            "min_test_races_required": 2,
+            "enough_test_races": True,
+            "logloss_beats_market_baseline": True,
+            "brier_not_worse_than_market": True,
+            "logloss_improvement_ci95_excludes_zero": True,
+            "logloss_improvement_adjusted_ci_excludes_zero": True,
+            "champion_comparison_required": True,
+            "champion_improvement_ci95_excludes_zero": True,
+            "champion_improvement_adjusted_ci_excludes_zero": True,
+            "beats_current_champion": True,
+            "information_gain_required": True,
+            "information_gain_positive": True,
+            "information_gain_ci95_excludes_zero": True,
+            "information_gain_adjusted_ci_excludes_zero": True,
+            "block_ablation_required": True,
+            "block_ablation_recorded": True,
+            "block_ablation_ci95_excludes_zero": True,
+            "block_ablation_adjusted_ci_excludes_zero": True,
+            "candidates_backtested": 1,
+            "candidates_in_family": 1,
+            "familywise_alpha": 0.05,
+            "effective_alpha": 0.05,
+            "multiple_comparison_method": "bonferroni",
+            "multiple_comparison_adjusted": True,
+            "multiple_comparison_stale": False,
+        }
+
+    def test_complete_significance_evidence_is_eligible(self):
+        gate = self.eligible_gate()
+        self.assertTrue(promotion_eligible(gate))
+        gate["candidates_in_family"] = 2
+        gate["effective_alpha"] = 0.025
+        self.assertTrue(promotion_eligible(gate))
+
+    def test_ablation_ci_crossing_zero_is_not_eligible(self):
+        gate = self.eligible_gate()
+        gate["block_ablation_ci95_excludes_zero"] = False
+        self.assertFalse(promotion_eligible(gate))
+
+    def test_positive_information_gain_with_ci_crossing_zero_is_not_eligible(self):
+        gate = self.eligible_gate()
+        self.assertTrue(gate["information_gain_positive"])
+        gate["information_gain_ci95_excludes_zero"] = False
+        self.assertFalse(promotion_eligible(gate))
+
+    def test_multiple_comparison_adjustment_is_enforced(self):
+        gate = self.eligible_gate()
+        gate["multiple_comparison_adjusted"] = False
+        self.assertFalse(promotion_eligible(gate))
+
+        gate = self.eligible_gate()
+        gate["logloss_improvement_adjusted_ci_excludes_zero"] = False
+        self.assertFalse(promotion_eligible(gate))
+
+        gate = self.eligible_gate()
+        gate["champion_improvement_adjusted_ci_excludes_zero"] = False
+        self.assertFalse(promotion_eligible(gate))
+
+    def test_legacy_stale_or_wrong_alpha_gate_cannot_promote(self):
+        gate = self.eligible_gate()
+        del gate["multiple_comparison_adjusted"]
+        self.assertFalse(promotion_eligible(gate))
+
+        gate = self.eligible_gate()
+        gate["multiple_comparison_stale"] = True
+        self.assertFalse(promotion_eligible(gate))
+
+        gate = self.eligible_gate()
+        gate["candidates_in_family"] = 2
+        gate["effective_alpha"] = 0.05
+        self.assertFalse(promotion_eligible(gate))
 
 
 class StakingUnitTests(unittest.TestCase):
@@ -775,7 +882,25 @@ class PipelineIntegrationTests(unittest.TestCase):
             ).stdout
         )
         self.assertEqual(with_ablation["ablation"]["block"], "intent")
-        self.assertTrue(with_ablation["promotion_gate"]["block_ablation_recorded"])
+        gate = with_ablation["promotion_gate"]
+        self.assertTrue(gate["block_ablation_recorded"])
+        self.assertEqual(gate["candidates_in_family"], 1)
+        self.assertEqual(gate["candidates_backtested"], 1)
+        self.assertEqual(gate["familywise_alpha"], 0.05)
+        self.assertEqual(gate["effective_alpha"], 0.05)
+        self.assertEqual(gate["multiple_comparison_method"], "bonferroni")
+        self.assertFalse(gate["multiple_comparison_stale"])
+        ablation_comparison = with_ablation["ablation"]["candidate_minus_without_block"]
+        self.assertEqual(ablation_comparison["alpha"], 0.05)
+        self.assertEqual(ablation_comparison["ci"], ablation_comparison["ci95"])
+        self.assertEqual(
+            gate["block_ablation_ci95_excludes_zero"],
+            ablation_comparison["ci95"][1] is not None and ablation_comparison["ci95"][1] < 0,
+        )
+        self.assertEqual(
+            gate["block_ablation_adjusted_ci_excludes_zero"],
+            ablation_comparison["ci"][1] is not None and ablation_comparison["ci"][1] < 0,
+        )
 
         self.run_cli(
             "fit", "--db", self.db, "--model-version", "abl-v2",
@@ -783,17 +908,37 @@ class PipelineIntegrationTests(unittest.TestCase):
             "--block", "intent=intent_centered",
             "--train-before", "2026-08-08", "--min-races", 6, "--epochs", 20,
         )
-        self.run_cli(
-            "backtest", "--db", self.db, "--model-version", "abl-v2",
-            "--min-train-races", 5, "--min-test-races", 2, "--refit-every", 2,
-            "--test-after", "2026-08-06", "--bootstrap", 50,
+        without_ablation = json.loads(
+            self.run_cli(
+                "backtest", "--db", self.db, "--model-version", "abl-v2",
+                "--min-train-races", 5, "--min-test-races", 2, "--refit-every", 2,
+                "--test-after", "2026-08-06", "--bootstrap", 50,
+            ).stdout
         )
+        second_gate = without_ablation["promotion_gate"]
+        self.assertEqual(second_gate["candidates_in_family"], 2)
+        self.assertEqual(second_gate["effective_alpha"], 0.025)
+        self.assertEqual(without_ablation["candidate_minus_baseline_logloss"]["alpha"], 0.025)
+        self.assertEqual(without_ablation["information_gain_vs_market"]["alpha"], 0.025)
         promotion = json.loads(
             self.run_cli("promote", "--db", self.db, "--model-version", "abl-v2").stdout
         )
         self.assertEqual(promotion["event"], "rejected")
         self.assertTrue(promotion["promotion_gate"]["block_ablation_missing"])
-        self.assertGreaterEqual(promotion["promotion_gate"]["candidates_backtested"], 1)
+        self.assertEqual(promotion["promotion_gate"]["candidates_backtested"], 2)
+        self.assertFalse(promotion["promotion_gate"]["multiple_comparison_stale"])
+
+        stale = json.loads(
+            self.run_cli("promote", "--db", self.db, "--model-version", "abl-v1").stdout
+        )
+        self.assertEqual(stale["event"], "rejected")
+        self.assertTrue(stale["promotion_gate"]["multiple_comparison_stale"])
+        self.assertEqual(stale["promotion_gate"]["candidates_in_family"], 1)
+        self.assertEqual(stale["promotion_gate"]["current_candidates_in_family"], 2)
+        self.assertEqual(stale["promotion_gate"]["effective_alpha"], 0.05)
+        self.assertEqual(stale["promotion_gate"]["current_effective_alpha"], 0.025)
+        self.assertFalse(stale["promotion_gate"]["multiple_comparison_adjusted"])
+
         bypass = self.run_cli(
             "promote", "--db", self.db, "--model-version", "abl-v2",
             "--allow-missing-ablation", ok=False,
