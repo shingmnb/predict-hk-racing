@@ -12,6 +12,6 @@
 - Append-only SQLite 賽前快照、預測、賽果、模型及評估紀錄。
 - Walk-forward 回測、log loss、Brier、校準、bootstrap 及 champion 比較。
 - 模型 `fitted`、`promoted`、`rejected` 版本事件與意圖 ablation 流程。
-- 虛構數據端到端測試、Skill 打包工具、GitHub Actions、Issue 與 PR 模板。
+- 虛構數據端到端測試、Skill 打包工具、Issue 與 PR 模板。
 
 [0.1.0]: https://github.com/shingmnb/predict-hk-racing/releases/tag/v0.1.0

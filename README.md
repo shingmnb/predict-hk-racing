@@ -1,10 +1,10 @@
 # predict-hk-racing
 
-[![test](https://github.com/shingmnb/predict-hk-racing/actions/workflows/test.yml/badge.svg)](https://github.com/shingmnb/predict-hk-racing/actions/workflows/test.yml)
-
 香港賽馬數據驅動預測 Skill：自動搜集及核實資料、分析能力／形勢／馬房去馬意圖、輸出勝出與位置概率，再用不可覆寫紀錄、時間順序回測及模型升級門檻持續校準。
 
 > 呢個項目處理嘅「去馬」係基於公開證據嘅不確定推論，唔係內幕消息。概率唔係保證；賽馬高方差，請只用可承受損失作娛樂預算。
+
+> 發佈狀態：源碼、測試同維護文件已公開；GitHub Actions 同自動 Release 會喺 `workflow` 權限啟用後配置。
 
 ## 功能
 
