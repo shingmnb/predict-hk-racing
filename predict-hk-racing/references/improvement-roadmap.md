@@ -1,6 +1,6 @@
 # 改進路線圖（improvement roadmap — 來自實戰系統交叉評審）
 
-> 來源：另一個實戰系統（hermes hkjc-horse-racing，10 個月誤差累積 H0-H26 ledger + 2026-10-24 費明頓 9 場實測）嘅交叉評審。
+> 來源：另一個實戰系統（10 個月誤差累積 hypothesis ledger + 2026-10-24 費明頓 9 場實測）嘅交叉評審。
 > 你嘅骨架（認識論紀律 + ML ops）係對嘅，以下係補血肉嘅具體改法。每份 PR 獨立可合，附實證動機 + schema 草稿 + 驗收 tests。
 
 ---
@@ -114,11 +114,11 @@ tipster_consensus = normalized_score  # 0=冇人提, 1=全體頭選
 
 ---
 
-## PR 6（最高槓桿）：數據 bridge — hermes 歷史入庫，你即刻有 200+ 場 fit
+## PR 6（最高槓桿）：數據 bridge — 歷史快照批次入庫，即刻有 200+ 場 fit
 
 **問題**：你嘅 promote 門檻要測試場數樣本。由 n=0 開始自動累積要幾個月。
 
-**建議改法**：`scripts/bridge_import.py` — 將另一系統（hermes-racing-skills）嘅歷史快照批次轉換：
+**建議改法**：`scripts/bridge_import.py` — 將另一系統（racing-data-system）嘅歷史快照批次轉換：
 
 ```
 races.json + odds_r*.json（每場 10-14 匹 + 同時點全場賠率 + 賽果）
@@ -146,4 +146,82 @@ races.json + odds_r*.json（每場 10-14 匹 + 同時點全場賠率 + 賽果）
 | 2 海外場 | 中 | ★★（季節性）| 第 5 |
 | 5 bet-structure | 小 | ★★（用戶體驗）| 第 6 |
 
-—— 小愛（hermes hkjc-horse-racing 維護者）2026-10-24
+—— 外部實戰系統維護者 2026-10-24
+
+---
+
+# 學術文獻升級版（2026-10-24 第二輪 — 論文 backed）
+
+> 來源：OpenAlex 學術檢索（market efficiency 經典系列 + 香港 ML 前例 + 2026 SOTA）。
+> 你嘅核心設計有幾個選擇啱啱獲得學術背書 — 標 ✔ 嘅係「論文話你啱」；PR 7-9 係新證據驅動嘅增量。
+
+## ✔ 學術背書（唔使改）
+
+| 你嘅設計 | 論文背書 |
+|---|---|
+| 「落飛唔好當獨立意圖證據」 | **Camerer 1998**（JCR，cites 134）：$500/$1000 落注再取消實驗 — 賠率郁但快速回復，操縱效果 shallow 而短命 → 落飛訊號本身好弱 |
+| 「市場基準做比較線」 | **Asch, Malkiel & Quandt 1981**（cites 248）：win pool 接近有效 — beat 市場唔係應有假設 |
+| 「樣本不足退回市場基準」 | **Thaler & Ziemba 1988**（cites 621）：parimutuel 市場異象系統性存在但細 — 未有驗證優勢前市場基準係理性起點 |
+| 凍結版本 + 時間外回測 | walk-forward 係量化共識；1984 Ziemba 模擬已用嚴格時間外樣本 |
+
+## PR 7：Place/Show pool 低效掃描器（學術最強槓桿 ★★★★）
+
+**證據**：**Asch, Malkiel & Quandt 1982「Racetrack betting and informed behavior」**（cites 150）+ **Ziemba 1984「Dr. Z」模擬** — win pool 高效但 **place/show pool 有系統性低效**：大熱馬嘅 place/show 價成日被過度擠壓（公眾湧去買冷門 place），令「大熱 place」長期 +EV。
+
+**建議改法**：你已有 Plackett–Luce place 概率 — 加一個掃描函數：
+
+```python
+def place_value_scan(place_probs, place_odds_snapshot):
+    """對每匹：P(place|PL) vs 1/place_odds 去水 → gap 排序
+    觸發條件：gap > 歷史去水偏差 + 交易成本（place pool takeout ~17.5% HK）"""
+    # 重點掃描對象：市場 top1-3 大熱（Dr. Z 經典位）
+```
+
+- 需要 fetch 層加 place odds（同 WIN 快照同一時點 — 你嘅規則直接延伸）
+- 同半冷 place 投注策略互補：掃描器會同時捉「大熱 place 被擠壓」同「半冷 place 被低估」兩邊
+
+## PR 8：Ensemble committee（香港前例 ★★★）
+
+**證據**：**「A SVM-Based committee machine for prediction of Hong Kong horse racing」2017**（cites 11）— 3 年 HKJC 數據訓練 committee machine，香港場直接前例：**ensemble 優於單模型**。
+
+**建議改法**：conditional logit（你已有）+ gradient boosting（LightGBM，處理非線性互動：檔位×路程×場地）兩路並行 → 簡單加權融合。你嘅 promote 門檻機制照守 — champion 對象由「市場基準」升級做「ensemble vs 單 logit vs 市場」三方。
+
+## PR 9：Favourite-longshot bias 校準層（經典異象 ★★★）
+
+**證據**：**Thaler & Ziemba 1988** + **Sobel & Raines 1997**（cites 120）— parimutuel 市場 favourite-longshot bias 穩定存在：大熱真實勝率高過市場隱含、大冷低過隱含。
+
+**建議改法**：模型概率輸出之後加一層 bias correction（唔係改特徵）：
+
+```python
+def flb_correction(p_market_normalized, flb_params):
+    """p' = p * (1 + alpha * log(p/q_uniform))，alpha 由自己 walk-forward 數據學
+    大熱微升、大冷微降 — 學到 alpha≈0 即無 bias（誠實輸出）"""
+```
+
+- 校準層參數 `flb_params` 入 model_version 凍結 — 同你現有審計制無縫
+- 香港場 bias 強度同美英唔同（池大、職業賭客多）— 由自己數據學而唔抄文獻數值（你嘅「唔好人手加權重」原則照守）
+
+## 時間線建議
+
+| 階段 | 內容 | 觸發條件 |
+|---|---|---|
+| 而家 | PR 6 bridge + PR 1 fetch（數據地基）| 即刻 |
+| n ≥ 100 場 | PR 3 tipster + PR 7 place pool 掃描 | 有特徵數據 |
+| n ≥ 300 場 | PR 8 ensemble + PR 9 FLB 校準 | 樣本支持非線性 |
+
+## 未採用嘅 SOTA（記錄在案）
+
+- **2026 Transformer 賽果預測**：sequence model 馬匹狀態時間序列 — 需 500+ 場先唔會過拟合；而家採用會違反你自己嘅「未夠樣本唔好自創精準」原則
+- **2018 graph-based features**：對手相遇圖 — 同場同程 stats 已覆蓋核心；n 大後可試
+- **2001 going prediction**：場地預測 — 屬天氣模型，scope 之外
+
+## 參考文獻（OpenAlex 檢索 2026-10-24）
+
+1. Asch, Malkiel & Quandt (1981) Efficiency of the Market for Racetrack Betting — c:248
+2. Asch, Malkiel & Quandt (1982) Racetrack betting and informed behavior — c:150
+3. Ziemba (1984) Market Efficiency in Racetrack Betting (Dr. Z) — c:119
+4. Thaler & Ziemba (1988) Anomalies: Parimutuel Betting Markets — c:621
+5. Camerer (1998) Can Asset Markets Be Manipulated? — c:134
+6. Sobel & Raines (1997) Why is There a Favourite-Longshot Bias — c:120
+7. Lam et al. (2017) SVM-Based committee machine, HK racing — c:11
+8.Transformer-Based Prediction (2026) — 新 SOTA，樣本門檻未到
