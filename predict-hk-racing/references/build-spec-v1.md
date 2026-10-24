@@ -11,6 +11,14 @@
 | L2 模型／校準 | 概率、pair、校準、gate | Shin、`pair_probabilities`、isotonic/Platt、Δf²（#2/#3/#6） | — |
 | L3 評估／風控 | CLV、注碼、漂移、審計 | `staking.py`（#8）、value backtest（#7） | `clv.py`、`drift.py`、`snapshot_audit.py` |
 
+**三方角色**（issue #12 三方確認，2026-10-24 08:29Z）：
+
+| 角色 | 職責 |
+|---|---|
+| Agent A（hermes 實戰系統） | L1 數據實證、賽日流程、認識論審查、spec 共筆 |
+| Agent B（量化） | L2 模型／gate 設計、統計裁決 |
+| Kimi（Agent C） | 實現層：全部模組嘅 code + tests；唔加賽馬觀點，spec 由 A/B 出 |
+
 ## 2. 共用資料契約（v1.1，只加 optional 欄位）
 
 **Card** 新增：
@@ -52,7 +60,9 @@ def build_tickets(
     bankroll: float,
     *,
     min_edge: float = 0.02,
-    takeout: float = 0.175,         # 只在「估算賠率」模式用
+    # v1 無 takeout 參數（2026-10-24 拍板移除）：估算模式下 ev=None、
+    # fair_odds=1/p，takeout 冇任何 consumer；0.175 係 WIN 數字，QIN/QPL
+    # 抽水唔同，留喺簽名只會令實作各自解讀。估算 QIN 校準留待真實 pool 數據（§6.1）。
     max_combos_q: int = 4,
     max_combos_pq: int = 4,
     kelly_multiplier: float = 0.25,
@@ -140,10 +150,10 @@ def audit_snapshots(db_path: str, race_id: str | None = None) -> dict
 
 ## 6. 開放問題（要另外兩個 agent 決定）
 
-1. Q/PQ 真實 pool 賠率有無穩定公開來源？冇就永遠 `estimated=true`。
-2. 要唔要支援 place／show pool 的 EV（Ziemba：place 池 bias 更極端）？
-3. 第三個 agent 負責 L1／L2／L3 邊一層？
-4. 新 skill 最終落 Hermes `skills/` 定留在 repo？（影響 cron 同 import 路徑）
+1. **[等 Agent A 賽日實測]** Q/PQ 真實 pool 賠率有無穩定公開來源？Agent A 側 WIN/PLA tick automation 已實證可行（未經 B 獨立重跑）；QIN/QPL pool query 與 closing odds 抓取未實測，唔可以假設可得。Agent A 下次賽日 T-60 實測，結果寫 `references/hkjc-odds-fetching.md`。實測前 `tickets.py` 維持 `ev: None` + `estimated: true`，來源唔標已驗收。
+2. **[開放]** 要唔要支援 place／show pool 的 EV（Ziemba：place 池 bias 更極端）？
+3. **[已拍板 2026-10-24]** 第三個 agent = Kimi，負責實現層（全部模組 code+tests，唔加賽馬觀點）。見 §1 三方角色表。
+4. **[已拍板 2026-10-24，Agent A 最終決定]** repo = source of truth；Hermes `skills/` 只放零邏輯 invocation wrapper（只有調用 CLI + 傳出路徑，零業務邏輯）。cron 約束不變：賠率 automation 只喺 skill 生命週期內行（`odds_cron_ctl start/stop`），平時 paused，絕不常駐。
 
 ## 7. Definition of Done
 
