@@ -10,7 +10,7 @@ import re
 import sqlite3
 import sys
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -629,6 +629,31 @@ def command_fit(args) -> dict:
     return model
 
 
+def calibration_window_guard(template: dict | None, records: list[dict], test_indices: list[int]) -> str | None:
+    """A calibrated model may only be scored on races after its calibration data.
+
+    ``calibrate`` fits on every post-training race it can see, so scoring an
+    earlier race would leak the calibrator's fitting outcomes into the score.
+    """
+    calibration = (template or {}).get("calibration")
+    if not calibration:
+        return None
+    through = calibration.get("through")
+    if not through:
+        raise ValueError(
+            "Calibrated model has no calibration_through date; rerun calibrate with a current version."
+        )
+    first_test_date = min(records[index]["card"]["race"]["meeting_date"] for index in test_indices)
+    if first_test_date <= through:
+        suggested = (date.fromisoformat(through) + timedelta(days=1)).isoformat()
+        raise ValueError(
+            f"Calibrated models can only be evaluated on races after {through}; "
+            f"the test window starts on {first_test_date}. "
+            f"Pass --test-after {suggested} or later."
+        )
+    return through
+
+
 def walk_forward_predictions(records: list[dict], template: dict | None, test_indices: list[int], refit_every: int):
     """Yield (record, prediction) pairs under an expanding window."""
     cached = None
@@ -638,6 +663,9 @@ def walk_forward_predictions(records: list[dict], template: dict | None, test_in
             cached = None
         elif cached is None or index >= next_refit:
             cached = fit_model(records[:index], template["features"], **template["hyperparameters"])
+            if template.get("calibration"):
+                cached["calibration"] = template["calibration"]
+            cached["model_version"] = template.get("model_version", cached.get("model_version"))
             next_refit = index + refit_every
         record = records[index]
         prediction = predict_card(
@@ -733,6 +761,8 @@ def promotion_eligible(gate: dict) -> bool:
     )
     if gate.get("champion_comparison_required"):
         eligible = eligible and gate.get("champion_improvement_adjusted_ci_excludes_zero") is True
+    if gate.get("calibration_evidence_required"):
+        eligible = eligible and gate.get("calibration_evidence_valid") is True
     if gate.get("information_gain_required"):
         eligible = (
             eligible
@@ -776,6 +806,7 @@ def command_backtest(args) -> dict:
             test_indices.append(index)
         if not test_indices:
             raise ValueError("No races in the walk-forward test window")
+        calibration_through = calibration_window_guard(template, records, test_indices)
         candidate_rows = walk_forward(records, template, test_indices, args.refit_every)
         baseline_rows = []
         for index in test_indices:
@@ -801,6 +832,7 @@ def command_backtest(args) -> dict:
         champion_comparison = None
         if champion_version and champion_version != args.model_version:
             champion_template = get_model(db, champion_version)
+            calibration_window_guard(champion_template, records, test_indices)
             champion_rows = walk_forward(records, champion_template, test_indices, args.refit_every)
             by_race = {row["race_id"]: row for row in champion_rows}
             aligned = [by_race[row["race_id"]] for row in candidate_rows if row["race_id"] in by_race]
@@ -979,6 +1011,8 @@ def command_backtest(args) -> dict:
                 "test_after": args.test_after,
                 "test_before": args.test_before,
                 "bootstrap_samples": args.bootstrap,
+                "calibration_applied": calibration_through is not None,
+                "calibration_through": calibration_through,
             },
             "candidate": candidate_summary,
             "market_baseline": baseline_summary,
@@ -1062,6 +1096,20 @@ def command_promote(args) -> dict:
         report_rows = [(row, json.loads(row["report_json"])) for row in rows]
         row, report = report_rows[0]
         gate = dict(report["promotion_gate"])
+        calibration = model.get("calibration") or {}
+        calibration_through = calibration.get("through")
+        calibration_evidence_required = bool(calibration)
+        method = report.get("method") or {}
+        gate["calibration_evidence_required"] = calibration_evidence_required
+        gate["calibration_evidence_valid"] = (
+            not calibration_evidence_required
+            or (
+                bool(calibration_through)
+                and report.get("source_model_hash") == payload_hash(model)
+                and method.get("calibration_applied") is True
+                and method.get("calibration_through") == calibration_through
+            )
+        )
         current_candidates = db.execute(
             "SELECT COUNT(DISTINCT model_version) FROM evaluation_runs WHERE kind = 'backtest'"
         ).fetchone()[0]
@@ -1183,6 +1231,7 @@ def command_value_backtest(args) -> dict:
             test_indices.append(index)
         if not test_indices:
             raise ValueError("No races in the walk-forward test window")
+        calibration_through = calibration_window_guard(template, records, test_indices)
         stream = walk_forward_predictions(records, template, test_indices, args.refit_every)
         settlement = settle_stream(
             stream,
@@ -1208,6 +1257,8 @@ def command_value_backtest(args) -> dict:
                 "test_before": args.test_before,
                 "pool_size_assumption": args.pool_size,
                 "stake_unit": args.stake_unit,
+                "calibration_applied": calibration_through is not None,
+                "calibration_through": calibration_through,
             },
             "settlement": settlement,
         }
@@ -1291,6 +1342,9 @@ def command_calibrate(args) -> dict:
         scores = [point[0] for point in fit_points]
         labels = [point[1] for point in fit_points]
         fitted = isotonic_fit(scores, labels) if args.method == "isotonic" else platt_fit(scores, labels)
+        calibration_through = max(
+            record["card"]["race"]["meeting_date"] for record, _ in post_predictions
+        )
         fit_race_ids = [record["card"]["race"]["race_id"] for record, _ in fit_predictions]
         evaluation_race_ids = [
             record["card"]["race"]["race_id"] for record, _ in evaluation_predictions
@@ -1309,6 +1363,7 @@ def command_calibrate(args) -> dict:
                     "post_train_samples": len(fit_points),
                     "source": "post-train-out-of-sample",
                     "train_before": train_before,
+                    "through": calibration_through,
                     "fit_race_count": len(fit_predictions),
                     "evaluation_race_count": len(evaluation_predictions),
                     "post_train_race_count": len(post_predictions),

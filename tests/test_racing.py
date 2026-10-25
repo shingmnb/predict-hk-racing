@@ -876,7 +876,7 @@ class PipelineIntegrationTests(unittest.TestCase):
             self.run_cli("import-result", "--db", self.db, "--file", result_path)
         return dates
 
-    def insert_synthetic_model(self, version, required_blocks=None):
+    def insert_synthetic_model(self, version, required_blocks=None, calibration=None):
         model = {
             "algorithm": "conditional-logit-v1",
             "model_version": version,
@@ -889,6 +889,8 @@ class PipelineIntegrationTests(unittest.TestCase):
         }
         if required_blocks is not None:
             model["required_blocks"] = required_blocks
+        if calibration is not None:
+            model["calibration"] = calibration
         with closing(sqlite3.connect(self.db)) as connection, connection:
             connection.execute(
                 "INSERT INTO models(model_version, created_at, algorithm, config_json) VALUES (?, ?, ?, ?)",
@@ -905,6 +907,8 @@ class PipelineIntegrationTests(unittest.TestCase):
         window="2026-08-06",
         family_count=1,
         source_hash=None,
+        calibration_evidence=False,
+        calibration_through=None,
     ):
         alpha = 0.05 / family_count
         required = model.get("required_blocks", [])
@@ -992,6 +996,11 @@ class PipelineIntegrationTests(unittest.TestCase):
                 "market_baseline": {"race_id": "synthetic-race", "logloss": 0.5},
             }],
         }
+        if calibration_evidence:
+            report["method"]["calibration_applied"] = True
+            report["method"]["calibration_through"] = (
+                calibration_through or model["calibration"]["through"]
+            )
         with closing(sqlite3.connect(self.db)) as connection, connection:
             connection.execute(
                 "INSERT INTO evaluation_runs VALUES (?, ?, ?, ?, ?)",
@@ -1528,6 +1537,113 @@ class PipelineIntegrationTests(unittest.TestCase):
                 "SELECT COUNT(*) FROM models WHERE model_version = 'cal-short-post-cal'"
             ).fetchone()[0]
         self.assertEqual(count, 0)
+
+
+    def test_calibrated_backtest_requires_post_calibration_window(self):
+        self.run_cli("init", "--db", self.db)
+        self.build_history(1, 16)
+        self.run_cli(
+            "fit", "--db", self.db, "--model-version", "cb-base",
+            "--features", "market_logp,rating", "--train-before", "2026-08-10",
+            "--min-races", 8, "--epochs", 30,
+        )
+        calibration = json.loads(
+            self.run_cli(
+                "calibrate", "--db", self.db, "--model-version", "cb-base",
+                "--new-version", "cb-cal", "--method", "isotonic",
+                "--min-train-races", 6, "--min-samples", 20,
+            ).stdout
+        )
+        self.assertEqual(calibration["through"], "2026-08-16")
+
+        overlapped = self.run_cli(
+            "backtest", "--db", self.db, "--model-version", "cb-cal",
+            "--min-train-races", 5, "--min-test-races", 2, "--refit-every", 2,
+            "--test-after", "2026-08-14", "--bootstrap", 50, ok=False,
+        )
+        self.assertIn("after 2026-08-16", overlapped.stderr)
+
+        self.build_history(17, 4)
+        report = json.loads(
+            self.run_cli(
+                "backtest", "--db", self.db, "--model-version", "cb-cal",
+                "--min-train-races", 5, "--min-test-races", 2, "--refit-every", 2,
+                "--test-after", "2026-08-17", "--bootstrap", 50,
+            ).stdout
+        )
+        self.assertTrue(report["method"]["calibration_applied"])
+        self.assertEqual(report["method"]["calibration_through"], "2026-08-16")
+        uncalibrated = json.loads(
+            self.run_cli(
+                "backtest", "--db", self.db, "--model-version", "cb-base",
+                "--min-train-races", 5, "--min-test-races", 2, "--refit-every", 2,
+                "--test-after", "2026-08-17", "--bootstrap", 50,
+            ).stdout
+        )
+        self.assertNotAlmostEqual(
+            report["candidate"]["logloss"], uncalibrated["candidate"]["logloss"]
+        )
+
+        # A synthetic champion event isolates the champion-side leakage guard.
+        with closing(sqlite3.connect(self.db)) as connection, connection:
+            connection.execute(
+                "INSERT INTO model_events VALUES (?, ?, ?, ?, ?)",
+                ("synthetic_cb_champion", "cb-cal", "promoted", "2099-01-01T00:00:00+00:00", "{}"),
+            )
+        champion_overlap = self.run_cli(
+            "backtest", "--db", self.db, "--model-version", "cb-base",
+            "--min-train-races", 5, "--min-test-races", 2, "--refit-every", 2,
+            "--test-after", "2026-08-14", "--bootstrap", 50, ok=False,
+        )
+        self.assertIn("after 2026-08-16", champion_overlap.stderr)
+
+    def test_calibrated_promotion_requires_current_calibrated_backtest(self):
+        self.run_cli("init", "--db", self.db)
+        model = self.insert_synthetic_model(
+            "calibrated-promotion",
+            required_blocks=[],
+            calibration={
+                "method": "platt",
+                "model": {"a": 1.0, "b": 0.0},
+                "through": "2026-08-08",
+            },
+        )
+
+        def promote():
+            return json.loads(
+                self.run_cli(
+                    "promote", "--db", self.db, "--model-version", model["model_version"]
+                ).stdout
+            )
+
+        self.insert_synthetic_backtest(
+            model, "ev-calibrated-legacy", "2026-08-09T00:00:01+00:00"
+        )
+        legacy = promote()
+        self.assertEqual(legacy["event"], "rejected")
+        self.assertTrue(legacy["promotion_gate"]["calibration_evidence_required"])
+        self.assertFalse(legacy["promotion_gate"]["calibration_evidence_valid"])
+
+        self.insert_synthetic_backtest(
+            model,
+            "ev-calibrated-mismatched",
+            "2026-08-09T00:00:02+00:00",
+            calibration_evidence=True,
+            calibration_through="2026-08-07",
+        )
+        mismatched = promote()
+        self.assertEqual(mismatched["event"], "rejected")
+        self.assertFalse(mismatched["promotion_gate"]["calibration_evidence_valid"])
+
+        self.insert_synthetic_backtest(
+            model,
+            "ev-calibrated-current",
+            "2026-08-09T00:00:03+00:00",
+            calibration_evidence=True,
+        )
+        current = promote()
+        self.assertEqual(current["event"], "promoted")
+        self.assertTrue(current["promotion_gate"]["calibration_evidence_valid"])
 
 
 class DomainRuleTests(unittest.TestCase):

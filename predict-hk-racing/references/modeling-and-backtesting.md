@@ -61,6 +61,8 @@ ece = expected_calibration_error(list(zip(later_holdout_probs, later_holdout_lab
 
 **最重要的紀律：校準分數必須對部署 source model 屬時間外樣本。** `calibrate` 固定未校準嘅 source model，只用 `meeting_date >= train_before` 嘅已完成場次；唔會 walk-forward refit 另一個 fold model，亦唔會退回訓練窗。窗後較早場次用嚟擬合，最後 25%（至少一場）留作較後 holdout，`ece_before`／`ece_after` 共用呢批獨立評估點，唔重用 fit points。套用校準時必須逐場處理全場概率再 normalise，唔可以逐匹單點套用。
 
+**不變量：評估對象必須等於預測對象。** `backtest`／`value-backtest` 對有 `calibration` 的版本，會逐窗把校準層套到 refit 模型（報告 `calibration_applied: true`），並用 `calibration.through` 擋住與校準資料重疊的測試窗；champion 比較亦受同一防線約束。否則 gate 批准的是未校準模型，實際輸出卻是校準版，兩者唔一致。`promote` 只接受 source model hash 相同、`calibration_applied: true` 且 `calibration_through` 與目前版本一致的校準版回測證據；修復前或錯配報告會記錄 `calibration_evidence_valid: false` 並拒絕晉升。
+
 - `isotonic`：非參數、樣本多時較準；小樣本（<500 點）容易階梯化，建議配 `n ≥ 300`。
 - `platt`：兩個參數、小樣本穩定，但只能修正單調壓縮，修正不了非單調偏差。
 - `ece`：10 等寬 bin 的加權 |confidence − accuracy|；< 0.05 可接受。
