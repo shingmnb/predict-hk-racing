@@ -1066,6 +1066,88 @@ class PipelineIntegrationTests(unittest.TestCase):
         self.assertIn("unrecognized arguments", bypass.stderr)
 
 
+    def test_optional_block_does_not_gate_promotion(self):
+        self.run_cli("init", "--db", self.db)
+        self.build_history(1, 10)
+        self.run_cli(
+            "fit", "--db", self.db, "--model-version", "opt-v1",
+            "--features", "market_logp,intent_centered,rating",
+            "--block", "intent=intent_centered",
+            "--train-before", "2026-08-08", "--min-races", 6, "--epochs", 20,
+        )
+        report = json.loads(
+            self.run_cli(
+                "backtest", "--db", self.db, "--model-version", "opt-v1",
+                "--min-train-races", 5, "--min-test-races", 2, "--refit-every", 2,
+                "--test-after", "2026-08-06", "--bootstrap", 50,
+            ).stdout
+        )
+        gate = report["promotion_gate"]
+        self.assertEqual(gate["required_blocks"], [])
+        self.assertFalse(gate["block_ablation_required"])
+        self.assertEqual(gate["required_block_ablation_missing"], [])
+
+    def test_required_block_needs_ablation_before_promotion(self):
+        self.run_cli("init", "--db", self.db)
+        self.build_history(1, 10)
+        self.run_cli(
+            "fit", "--db", self.db, "--model-version", "req-v1",
+            "--features", "market_logp,intent_centered,rating",
+            "--block", "intent=intent_centered", "--required-block", "intent",
+            "--train-before", "2026-08-08", "--min-races", 6, "--epochs", 20,
+        )
+        report = json.loads(
+            self.run_cli(
+                "backtest", "--db", self.db, "--model-version", "req-v1",
+                "--min-train-races", 5, "--min-test-races", 2, "--refit-every", 2,
+                "--test-after", "2026-08-06", "--bootstrap", 50,
+            ).stdout
+        )
+        gate = report["promotion_gate"]
+        self.assertEqual(gate["required_blocks"], ["intent"])
+        self.assertEqual(gate["required_block_ablation_missing"], ["intent"])
+        self.assertFalse(gate["eligible"])
+        promotion = json.loads(
+            self.run_cli("promote", "--db", self.db, "--model-version", "req-v1").stdout
+        )
+        self.assertEqual(promotion["event"], "rejected")
+
+    def test_calibrate_creates_version_and_predict_applies_it(self):
+        self.run_cli("init", "--db", self.db)
+        self.build_history(1, 14)
+        self.run_cli(
+            "fit", "--db", self.db, "--model-version", "cal-base",
+            "--features", "market_logp,rating", "--train-before", "2026-08-12",
+            "--min-races", 8, "--epochs", 40,
+        )
+        calibration = json.loads(
+            self.run_cli(
+                "calibrate", "--db", self.db, "--model-version", "cal-base",
+                "--new-version", "cal-base-cal", "--method", "isotonic",
+                "--min-train-races", 6, "--min-samples", 20, "--refit-every", 2,
+            ).stdout
+        )
+        self.assertEqual(calibration["method"], "isotonic")
+        self.assertEqual(calibration["source"], "out-of-fold")
+        self.assertIsNotNone(calibration["ece_before"])
+        self.assertIsNotNone(calibration["ece_after"])
+
+        card, _ = self.make_card("2026-12-01", live=True)
+        card_path = self.base / "cards" / "cal.json"
+        self.dump(card_path, card)
+        self.run_cli("import-card", "--db", self.db, "--file", card_path)
+        prediction = json.loads(
+            self.run_cli(
+                "predict", "--db", self.db, "--race-id", card["race"]["race_id"],
+                "--model-version", "cal-base-cal",
+            ).stdout
+        )
+        self.assertEqual(prediction["calibration"]["method"], "isotonic")
+        self.assertAlmostEqual(
+            sum(item["win_probability"] for item in prediction["runners"]), 1.0, places=9
+        )
+
+
 class DomainRuleTests(unittest.TestCase):
     def test_place_slots_follow_hkjc_terms(self):
         self.assertEqual(derive_place_slots(14), 3)
@@ -1179,7 +1261,6 @@ class DecisionUnitTests(unittest.TestCase):
     def test_coverage_slices_handles_empty_input(self):
         from decision import coverage_slices
         self.assertEqual(coverage_slices([], [50]), [])
-
 
 if __name__ == "__main__":
     unittest.main()

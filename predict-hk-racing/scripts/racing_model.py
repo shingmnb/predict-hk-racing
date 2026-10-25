@@ -609,6 +609,25 @@ def fit_model(
     }
 
 
+def apply_calibration(model: dict | None, probabilities: list[float]) -> list[float]:
+    """Apply a stored out-of-fold calibration layer and renormalise to one."""
+    calibration = (model or {}).get("calibration")
+    if not calibration:
+        return probabilities
+    method = calibration.get("method")
+    fitted = calibration.get("model")
+    if method == "isotonic":
+        adjusted = [max(EPS, isotonic_apply(fitted, value)) for value in probabilities]
+    elif method == "platt":
+        adjusted = [max(EPS, platt_apply(fitted, value)) for value in probabilities]
+    else:
+        raise ValueError(f"Unsupported calibration method: {method}")
+    total = sum(adjusted)
+    if total <= EPS:
+        return probabilities
+    return [value / total for value in adjusted]
+
+
 def predict_card(card: dict, model: dict | None = None, model_version: str = "market-baseline") -> dict:
     runners = active_runners(card)
     if len(runners) < 2:
@@ -638,6 +657,12 @@ def predict_card(card: dict, model: dict | None = None, model_version: str = "ma
             scores.append(_dot(coefficients, vector))
 
     probabilities = softmax(scores)
+    calibration_meta = (model or {}).get("calibration")
+    if calibration_meta:
+        probabilities = apply_calibration(model, probabilities)
+        warnings.append(
+            f"已套用 {calibration_meta.get('method')} 校準（out-of-fold，{calibration_meta.get('samples')} 個樣本）。"
+        )
     slots = min(int(card["race"].get("place_slots", 3)), len(runners))
     place = place_probabilities(probabilities, slots)
     output_runners = []
@@ -661,6 +686,15 @@ def predict_card(card: dict, model: dict | None = None, model_version: str = "ma
         "race_id": card["race"]["race_id"],
         "model_version": model_version,
         "algorithm": algorithm,
+        "calibration": (
+            {
+                "method": calibration_meta.get("method"),
+                "source": calibration_meta.get("source"),
+                "samples": calibration_meta.get("samples"),
+            }
+            if calibration_meta
+            else None
+        ),
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "data_cutoff": card["data_cutoff"],
         "place_slots": slots,

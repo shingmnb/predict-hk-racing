@@ -37,6 +37,12 @@ gain["delta"], gain["ci95"]              # Δf² 同 95% bootstrap 區間
 
 > 注意：Δf² 係相對市場的資訊優勢，唔等於 ROI。要賺錢仍然要過抽水 — 各池抽水唔同：WIN 池 17.5%（PR #13 拍板）；place/QIN/QPL 待 T-60 實測核實官方 takeout 表（issue #22），唔可以套用 WIN 數字。
 
+> **Δf² 唔係獨立證據**：`pseudo_r2 = 1 − logloss / log(field)`，所以對同一批場次，
+> `Δf² = (LL_market − LL_candidate) / mean(log field)`，分母恆正——每一個 bootstrap
+> resample 內，Δf² 與 log loss 差**同符號**。即係話 `--require-information-gain` 同
+> `logloss_improvement_adjusted_ci_excludes_zero` 實際上係同一個判斷（換了單位）。
+> 要第二個獨立 gate，應該用正交指標：CLV、校準誤差、或 value-backtest 的 ROI CI。
+
 ## 機率校準層（isotonic / Platt）
 
 **去水 ≠ 校準。** Shin 只係移除書商水位，模型輸出仍然可能系統性過度自信或不足。校準層負責把 raw probability 映射到實際命中率。

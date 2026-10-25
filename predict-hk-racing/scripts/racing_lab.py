@@ -27,8 +27,12 @@ from domain import (  # noqa: E402
 )
 from decision import coverage_slices, settle_stream  # noqa: E402
 from racing_model import (  # noqa: E402
+    apply_calibration,
     bootstrap_logloss_difference,
+    expected_calibration_error,
     information_gain_vs_market,
+    isotonic_fit,
+    platt_fit,
     fit_model,
     metric_row,
     predict_card,
@@ -604,6 +608,13 @@ def command_fit(args) -> dict:
             unknown = sorted({name for block in blocks.values() for name in block} - set(features))
             if unknown:
                 raise ValueError(f"Blocks reference features that are not trained: {', '.join(unknown)}")
+            required_blocks = [name.strip() for name in args.required_block if name.strip()]
+            unknown_required = [name for name in required_blocks if name not in blocks]
+            if unknown_required:
+                raise ValueError(
+                    "Required blocks were never declared: " + ", ".join(unknown_required)
+                )
+            model["required_blocks"] = required_blocks
             model["feature_blocks"] = blocks
         model.update({"model_version": args.model_version, "created_at": now_iso(), "train_before": args.train_before})
         db.execute(
@@ -699,6 +710,8 @@ def promotion_eligible(gate: dict) -> bool:
             and gate.get("information_gain_ci95_excludes_zero") is True
             and gate.get("information_gain_adjusted_ci_excludes_zero") is True
         )
+    if gate.get("required_block_ablation_missing"):
+        eligible = False
     if gate.get("block_ablation_required"):
         eligible = (
             eligible
@@ -841,7 +854,14 @@ def command_backtest(args) -> dict:
             information_gain["ci"][0] is not None and information_gain["ci"][0] > 0
         )
         require_information_gain = bool(getattr(args, "require_information_gain", False))
-        block_ablation_required = bool(template.get("feature_blocks"))
+        required_blocks = [
+            name for name in template.get("required_blocks", [])
+            if name in template.get("feature_blocks", {})
+        ]
+        required_block_ablation_missing = [
+            name for name in required_blocks if name != args.ablate
+        ]
+        block_ablation_required = bool(args.ablate and args.ablate in required_blocks)
         block_ablation_recorded = bool(ablation and "candidate_minus_without_block" in ablation)
         ablation_comparison = ablation.get("candidate_minus_without_block") if block_ablation_recorded else None
         block_ablation_significant = bool(
@@ -853,6 +873,14 @@ def command_backtest(args) -> dict:
             ablation_comparison
             and ablation_comparison["ci"][1] is not None
             and ablation_comparison["ci"][1] < 0
+        )
+        optional_blocks_unproven = (
+            [args.ablate]
+            if args.ablate
+            and args.ablate not in required_blocks
+            and ablation_comparison is not None
+            and not block_ablation_adjusted_significant
+            else []
         )
         resolution_comparisons = [comparison]
         if champion_comparison is not None:
@@ -892,6 +920,14 @@ def command_backtest(args) -> dict:
             "information_gain_ci95_excludes_zero": information_gain_significant,
             "information_gain_adjusted_ci_excludes_zero": information_gain_adjusted_significant,
             "block_ablation_required": block_ablation_required,
+            "required_blocks": required_blocks,
+            "required_block_ablation_missing": required_block_ablation_missing,
+            "optional_blocks_unproven": optional_blocks_unproven,
+            "information_gain_note": (
+                "Δf² 係 log loss 差的單調變換（同一個 bootstrap），屬效應量而唔係獨立證據。"
+                if require_information_gain
+                else None
+            ),
             "block_ablation_recorded": block_ablation_recorded,
             "block_ablation_ci95_excludes_zero": block_ablation_significant,
             "block_ablation_adjusted_ci_excludes_zero": block_ablation_adjusted_significant,
@@ -1048,6 +1084,81 @@ def command_value_backtest(args) -> dict:
     return report
 
 
+def collect_oof_points(records: list[dict], template: dict, *, refit_every: int, min_train_races: int) -> list[tuple[float, int]]:
+    """Walk-forward probabilities labelled by whether the runner won."""
+    indices = list(range(min_train_races, len(records)))
+    points: list[tuple[float, int]] = []
+    for record, prediction in walk_forward_predictions(records, template, indices, refit_every):
+        winners = {
+            int(row["horse_no"])
+            for row in record["result"]["results"]
+            if row.get("finish_position") == 1
+        }
+        for item in prediction["runners"]:
+            points.append(
+                (float(item["win_probability"]), 1 if int(item["horse_no"]) in winners else 0)
+            )
+    return points
+
+
+def command_calibrate(args) -> dict:
+    with connect(args.db) as db:
+        source = get_model(db, args.model_version)
+        if db.execute("SELECT 1 FROM models WHERE model_version = ?", (args.new_version,)).fetchone():
+            raise ValueError("new_version already exists; pick a fresh calibration version")
+        train_before = source.get("train_before")
+        records = load_records(db, train_before=train_before)
+        if len(records) < args.min_train_races + 2:
+            raise ValueError(
+                f"Need at least {args.min_train_races + 2} completed races to collect out-of-fold predictions; "
+                f"found {len(records)}"
+            )
+        template = {key: value for key, value in source.items() if key in {"features", "hyperparameters"}}
+        points = collect_oof_points(
+            records, template, refit_every=args.refit_every, min_train_races=args.min_train_races
+        )
+        if len(points) < args.min_samples:
+            raise ValueError(
+                f"Need at least {args.min_samples} out-of-fold runner predictions; found {len(points)}"
+            )
+        scores = [point[0] for point in points]
+        labels = [point[1] for point in points]
+        fitted = isotonic_fit(scores, labels) if args.method == "isotonic" else platt_fit(scores, labels)
+        before = expected_calibration_error(points)
+        model = dict(source)
+        model.update(
+            {
+                "model_version": args.new_version,
+                "created_at": now_iso(),
+                "calibrated_from": args.model_version,
+                "calibration": {
+                    "method": args.method,
+                    "model": fitted,
+                    "samples": len(points),
+                    "source": "out-of-fold",
+                    "ece_before": before,
+                },
+            }
+        )
+        after_points = [
+            (apply_calibration(model, [score])[0], label) for score, label in points
+        ]
+        model["calibration"]["ece_after"] = expected_calibration_error(after_points)
+        db.execute(
+            "INSERT INTO models VALUES (?, ?, ?, ?)",
+            (args.new_version, model["created_at"], model["algorithm"], canonical(model)),
+        )
+        event_id = "me_" + uuid.uuid4().hex
+        db.execute(
+            "INSERT INTO model_events VALUES (?, ?, ?, ?, ?)",
+            (
+                event_id, args.new_version, "calibrated", now_iso(),
+                canonical({"calibrated_from": args.model_version, "method": args.method, "samples": len(points)}),
+            ),
+        )
+    return model["calibration"] | {"model_version": args.new_version}
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -1099,6 +1210,10 @@ def build_parser() -> argparse.ArgumentParser:
     fit.add_argument("--l2", type=float, default=0.01)
     fit.add_argument("--learning-rate", type=float, default=0.05)
     fit.add_argument("--epochs", type=int, default=300)
+    fit.add_argument(
+        "--required-block", action="append", default=[], metavar="NAME",
+        help="Block that must prove itself in --ablate before promotion (others are optional)",
+    )
     fit.add_argument(
         "--min-feature-coverage", type=float, default=0.5,
         help="Reject training when a feature is observed for less than this share of runners",
@@ -1153,6 +1268,18 @@ def build_parser() -> argparse.ArgumentParser:
     value.add_argument("--test-before", help="Exclusive YYYY-MM-DD")
     value.add_argument("--output")
 
+    calibrate = sub.add_parser(
+        "calibrate", help="Fit an out-of-fold calibration layer and store it as a new model version"
+    )
+    calibrate.add_argument("--db", required=True)
+    calibrate.add_argument("--model-version", required=True)
+    calibrate.add_argument("--new-version", required=True)
+    calibrate.add_argument("--method", choices=["isotonic", "platt"], default="isotonic")
+    calibrate.add_argument("--min-train-races", type=int, default=50)
+    calibrate.add_argument("--min-samples", type=int, default=200)
+    calibrate.add_argument("--refit-every", type=int, default=5)
+    calibrate.add_argument("--output")
+
     promote = sub.add_parser("promote", help="Promote only an eligible model; otherwise record rejection")
     promote.add_argument("--db", required=True)
     promote.add_argument("--model-version", required=True)
@@ -1185,6 +1312,7 @@ def main() -> int:
             "fit": command_fit,
             "backtest": command_backtest,
             "value-backtest": command_value_backtest,
+            "calibrate": command_calibrate,
             "promote": command_promote,
         }
         result = handlers[args.command](args)

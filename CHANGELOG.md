@@ -26,6 +26,12 @@
 
 - 舊 `schema_version: "1.0"` 卡仍然接受，但會提示補 `quote`。建議新卡一律用 `1.1`。
 
+### Added (gate semantics & calibration)
+
+- `calibrate`：用 walk-forward 的 out-of-fold 預測擬合 isotonic/Platt，存成新版本；`predict` 自動套用並報 `ece_before`/`ece_after`。
+- `fit --required-block`：特徵塊分 required／optional；gate 只強制 required block 的 ablation，optional 未通過記入 `optional_blocks_unproven`。
+- 推廣 gate 標註 `information_gain_note`：Δf² 係 log loss 差的單調變換，唔算獨立證據。
+
 ## [0.2.0] - 2026-10-24
 
 ### Added

@@ -114,6 +114,10 @@ python "<SKILL>/scripts/racing_lab.py" predict \
 
 完整命令及欄位遵循 [schemas-and-cli.md](references/schemas-and-cli.md)，指標與升級門檻遵循 [modeling-and-backtesting.md](references/modeling-and-backtesting.md)。
 
+## 校準與特徵塊
+
+有足夠 out-of-fold 樣本就跑 `calibrate`（用新版本名，例如 `-cal`）；`predict` 會自動套用並在輸出報 `calibration`。特徵塊分 required／optional：只有 required 要 ablation 通過；optional 未通過就由最終特徵集剔除，唔好因此否決整個模型。
+
 ## 價值與選擇性使用
 
 有官方派彩就一定要跑 `value-backtest`：報 ROI、turnover、max drawdown 同注碼政策，唔好只報 log loss。Kelly 會放大概率估計誤差；ROI 要由時間外派彩結算證明，唔好預設正回報，亦唔好將虧損修飾成「接近打和」。
