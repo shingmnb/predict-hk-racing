@@ -347,8 +347,8 @@ def _logit(probability: float) -> float:
 def isotonic_fit(scores: list[float], labels: list[int]) -> dict:
     """Isotonic calibration with pool-adjacent-violators (PAVA).
 
-    ``scores`` must be **out-of-fold** probabilities: fitting on in-sample
-    predictions leaks the outcome and produces over-confident calibration.
+    ``scores`` must be out-of-sample for the deployment model being calibrated,
+    such as post-training holdout predictions or genuine out-of-fold predictions.
     Returns ``{"x": [...], "y": [...], "n": ...}`` where ``y`` is non-decreasing.
     """
     if len(scores) != len(labels):
@@ -418,7 +418,8 @@ def platt_fit(
 ) -> dict:
     """Platt scaling: fit ``p = sigmoid(a * logit(score) + b)`` by gradient descent.
 
-    As with isotonic calibration, ``scores`` should be out-of-fold predictions.
+    As with isotonic calibration, ``scores`` must be out-of-sample for the
+    deployment model being calibrated.
     """
     if len(scores) != len(labels):
         raise ValueError("scores and labels must have the same length")
@@ -610,7 +611,7 @@ def fit_model(
 
 
 def apply_calibration(model: dict | None, probabilities: list[float]) -> list[float]:
-    """Apply a stored out-of-fold calibration layer and renormalise to one."""
+    """Apply a stored calibration layer to one race and renormalise to one."""
     calibration = (model or {}).get("calibration")
     if not calibration:
         return probabilities
@@ -660,8 +661,14 @@ def predict_card(card: dict, model: dict | None = None, model_version: str = "ma
     calibration_meta = (model or {}).get("calibration")
     if calibration_meta:
         probabilities = apply_calibration(model, probabilities)
+        calibration_detail = (
+            f"{calibration_meta.get('source') or 'unknown'}，"
+            f"{calibration_meta.get('samples')} 個擬合樣本"
+        )
+        if calibration_meta.get("evaluation_samples") is not None:
+            calibration_detail += f"，{calibration_meta['evaluation_samples']} 個獨立評估樣本"
         warnings.append(
-            f"已套用 {calibration_meta.get('method')} 校準（out-of-fold，{calibration_meta.get('samples')} 個樣本）。"
+            f"已套用 {calibration_meta.get('method')} 校準（{calibration_detail}）。"
         )
     slots = min(int(card["race"].get("place_slots", 3)), len(runners))
     place = place_probabilities(probabilities, slots)
@@ -691,6 +698,7 @@ def predict_card(card: dict, model: dict | None = None, model_version: str = "ma
                 "method": calibration_meta.get("method"),
                 "source": calibration_meta.get("source"),
                 "samples": calibration_meta.get("samples"),
+                "evaluation_samples": calibration_meta.get("evaluation_samples"),
             }
             if calibration_meta
             else None

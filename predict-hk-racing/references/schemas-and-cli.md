@@ -150,16 +150,16 @@ python "<SKILL>/scripts/racing_lab.py" backtest \
 python "<SKILL>/scripts/racing_lab.py" promote --db "racing-data/racing.db" --model-version "candidate-2026-10-24"
 ```
 
-`promote` 唔允許人手跳過門檻；未合資格會寫 `rejected`。做 ablation 唔需要另開版本：`fit` 用 `--block name=feature,feature` 宣告特徵塊，`backtest --ablate name` 會在同一測試窗口重跑一次（移除該塊）並出 paired bootstrap。若模型宣告了 block 但 backtest 冇完整配對 ablation，`promote` 會拒絕，唔提供人手覆寫。報告列 `candidates_backtested`／`candidates_in_family`，promote 強制以 Bonferroni `effective_alpha = 0.05/n` 計調整後 CI 入閘（唔再只係提醒）；候選家族改變會標 `multiple_comparison_stale`，要先重跑 backtest 先可以再 promote。若 bootstrap 樣本不足以解析 adjusted CI 下尾，報告會將 adjusted `ci` 留空、記錄 `ci_warning`／`bootstrap_resolution_warning` 並拒絕 promote；要增加 `--bootstrap` 或按預先登記準則收窄家族後重跑，唔會將 bootstrap 最小值當分位數。
+`promote` 唔允許人手跳過門檻；未合資格會寫 `rejected`。做 ablation 唔需要另開版本：`fit` 用 `--block name=feature,feature` 宣告特徵塊，`backtest --ablate name` 會在同一測試窗口重跑一次（移除該塊）並出 paired bootstrap。每份報告保存 `source_model_hash`；required 證據必須完整、顯著而且同最新回測上下文一致，唔提供人手覆寫。報告列 `candidates_backtested`／`candidates_in_family`，promote 強制以 Bonferroni `effective_alpha = 0.05/n` 計調整後 CI 入閘（唔再只係提醒）；候選家族改變會標 `multiple_comparison_stale`，要先重跑 backtest 先可以再 promote。若入閘 comparison 嘅 bootstrap 樣本不足以解析 adjusted CI 下尾，報告會將 adjusted `ci` 留空、記錄 `ci_warning`／`bootstrap_resolution_warning` 並拒絕 promote；要增加 `--bootstrap` 或按預先登記準則收窄家族後重跑，唔會將 bootstrap 最小值當分位數。
 
 ## 特徵塊：required vs optional
 
 - `fit --block name=feature,feature`：宣告一個**可選**特徵塊；
-- `fit --block ... --required-block name`：標記為**必要**；
+- `fit --block ... --required-block name`：標記為**必要**；required 名稱冇對應 `--block` 會直接報錯；
 - `backtest --ablate name`：逐個 block 做配對 ablation（paired bootstrap）；
-- gate 只要求 **required** block 的 ablation 通過；optional block 若未通過，會記入
-  `optional_blocks_unproven`，唔會否決模型（合理做法係把該塊由最終特徵集移除，再 fit 新版本）；
-- `required_block_ablation_missing` 非空時，promote 一定拒絕。
+- 每個 **required** block 都要各自通過；`promote` 只累積同一 source model hash、方法／窗口、champion、candidate／baseline／逐場數據、候選家族同 alpha 嘅 `evaluation_runs`，並喺 `required_block_ablation_evidence` 記錄 evaluation id。呢個係 per-block necessity，唔代表 joint necessity；
+- optional block 若未通過，只記入 `optional_blocks_unproven`，唔會否決模型或佔用入閘 bootstrap resolution；程式唔會自動剔除，合理做法係另 fit 一個移除該塊嘅新版本；
+- `required_block_ablation_missing` 非空時，promote 一定拒絕。舊模型冇 `required_blocks` key 時，仍要求 latest backtest 有顯著 ablation，唔會跨 run 累積。
 
 ## 校準命令
 
@@ -171,10 +171,12 @@ python "<SKILL>/scripts/racing_lab.py" calibrate \
   --method isotonic --min-train-races 50 --min-samples 200
 ```
 
-- 用 walk-forward 收集 **out-of-fold** 預測，再 fit isotonic 或 Platt；
-- 結果存成**新版本**（append-only，唔改舊 model），config 內有 `calibration` 同 `ece_before` / `ece_after`；
-- `predict --model-version <new>` 會自動套用、重新 normalise，輸出多一個 `calibration` 欄位；
-- 樣本不足（`--min-samples`）或 race 數不足會直接報錯，唔會用 in-sample 預測偷偷擬合。
+- 固定未校準嘅 source model，只用 `meeting_date >= train_before` 嘅已完成場次預測，再 fit isotonic 或 Platt；唔會 refit fold model，亦唔會退回訓練窗；
+- 窗後最後 25% 場次（向上取整、至少一場）係獨立 evaluation holdout，較早場次先係 fit points；`--min-samples` 檢查 fit points，`samples` 係 fit runner 數，`evaluation_samples` 係 holdout runner 數，`post_train_samples` 係兩者合計；
+- `ece_before`／`ece_after` 只用同一批較後 holdout；after 會逐場套用校準、全場重新 normalise，唔會逐匹單點套用或重用 fit points；
+- config 記錄 fit／evaluation race IDs、場數、日期範圍同 `train_before` 分界；結果存成**新版本**（append-only，唔改舊 model）；
+- `predict --model-version <new>` 會自動逐場套用、重新 normalise，輸出 `calibration` 欄位同樣本來源；
+- 窗後場次或 fit 樣本不足會直接報錯並話你知欠幾多，唔會用訓練窗 in-sample 預測偷偷擬合。
 
 ## 價值與選擇性使用
 

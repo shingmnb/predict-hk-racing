@@ -604,16 +604,16 @@ def command_fit(args) -> dict:
             )
         model["feature_definitions"] = describe_features(features)
         blocks = parse_blocks(args.block)
+        required_blocks = [name.strip() for name in args.required_block if name.strip()]
+        unknown_required = [name for name in required_blocks if name not in blocks]
+        if unknown_required:
+            raise ValueError(
+                "Required blocks were never declared: " + ", ".join(unknown_required)
+            )
         if blocks:
             unknown = sorted({name for block in blocks.values() for name in block} - set(features))
             if unknown:
                 raise ValueError(f"Blocks reference features that are not trained: {', '.join(unknown)}")
-            required_blocks = [name.strip() for name in args.required_block if name.strip()]
-            unknown_required = [name for name in required_blocks if name not in blocks]
-            if unknown_required:
-                raise ValueError(
-                    "Required blocks were never declared: " + ", ".join(unknown_required)
-                )
             model["required_blocks"] = required_blocks
             model["feature_blocks"] = blocks
         model.update({"model_version": args.model_version, "created_at": now_iso(), "train_before": args.train_before})
@@ -663,6 +663,35 @@ def bonferroni_alpha(candidates_in_family: int) -> float:
     ):
         raise ValueError("candidates_in_family must be a positive integer")
     return FAMILYWISE_ALPHA / candidates_in_family
+
+
+def block_ablation_policy(model: dict) -> tuple[list[str], bool]:
+    """Return declared required blocks and whether legacy latest-run gating applies."""
+    blocks = model.get("feature_blocks") or {}
+    if "required_blocks" not in model:
+        return [], bool(blocks)
+    required = model.get("required_blocks")
+    if not isinstance(required, list) or any(
+        not isinstance(name, str) or not name for name in required
+    ):
+        raise ValueError("Model required_blocks must be a list of non-empty names")
+    return list(required), False
+
+
+def negative_ci_upper(comparison: dict | None, key: str) -> bool:
+    """Check a finite, strictly negative upper bound without trusting gate flags."""
+    if not comparison:
+        return False
+    interval = comparison.get(key)
+    if not isinstance(interval, list) or len(interval) != 2:
+        return False
+    upper = interval[1]
+    return (
+        isinstance(upper, (int, float))
+        and not isinstance(upper, bool)
+        and math.isfinite(upper)
+        and upper < 0
+    )
 
 
 def promotion_eligible(gate: dict) -> bool:
@@ -854,29 +883,21 @@ def command_backtest(args) -> dict:
             information_gain["ci"][0] is not None and information_gain["ci"][0] > 0
         )
         require_information_gain = bool(getattr(args, "require_information_gain", False))
-        required_blocks = [
-            name for name in template.get("required_blocks", [])
-            if name in template.get("feature_blocks", {})
-        ]
+        required_blocks, legacy_ablation_required = block_ablation_policy(template)
         required_block_ablation_missing = [
             name for name in required_blocks if name != args.ablate
         ]
-        block_ablation_required = bool(args.ablate and args.ablate in required_blocks)
+        block_ablation_required = legacy_ablation_required or bool(
+            args.ablate and args.ablate in required_blocks
+        )
         block_ablation_recorded = bool(ablation and "candidate_minus_without_block" in ablation)
         ablation_comparison = ablation.get("candidate_minus_without_block") if block_ablation_recorded else None
-        block_ablation_significant = bool(
-            ablation_comparison
-            and ablation_comparison["ci95"][1] is not None
-            and ablation_comparison["ci95"][1] < 0
-        )
-        block_ablation_adjusted_significant = bool(
-            ablation_comparison
-            and ablation_comparison["ci"][1] is not None
-            and ablation_comparison["ci"][1] < 0
-        )
+        block_ablation_significant = negative_ci_upper(ablation_comparison, "ci95")
+        block_ablation_adjusted_significant = negative_ci_upper(ablation_comparison, "ci")
         optional_blocks_unproven = (
             [args.ablate]
             if args.ablate
+            and not legacy_ablation_required
             and args.ablate not in required_blocks
             and ablation_comparison is not None
             and not block_ablation_adjusted_significant
@@ -887,7 +908,7 @@ def command_backtest(args) -> dict:
             resolution_comparisons.append(champion_comparison)
         if require_information_gain:
             resolution_comparisons.append(information_gain)
-        if ablation_comparison is not None:
+        if block_ablation_required and ablation_comparison is not None:
             resolution_comparisons.append(ablation_comparison)
         bootstrap_resolution_sufficient = all(
             item.get("ci_resolution_sufficient") is True for item in resolution_comparisons
@@ -949,6 +970,7 @@ def command_backtest(args) -> dict:
             "kind": "walk-forward-backtest-v1",
             "created_at": now_iso(),
             "model_version": args.model_version,
+            "source_model_hash": payload_hash(template),
             "champion_version": champion_version,
             "method": {
                 "validation": "expanding-window walk-forward; every fit uses races before the test race only",
@@ -980,18 +1002,66 @@ def command_backtest(args) -> dict:
     return report
 
 
+def required_ablation_comparison(
+    report: dict,
+    block: str,
+    latest: dict,
+    source_model_hash: str,
+    current_candidates: int,
+    current_alpha: float,
+) -> dict | None:
+    """Accept only comparable, resolved and independently significant required evidence."""
+    context_keys = ("method", "champion_version", "candidate", "market_baseline", "per_race")
+    if report.get("source_model_hash") != source_model_hash:
+        return None
+    if any(report.get(key) != latest.get(key) for key in context_keys):
+        return None
+    gate = report.get("promotion_gate") or {}
+    ablation = report.get("ablation") or {}
+    comparison = ablation.get("candidate_minus_without_block")
+    stored_alpha = gate.get("effective_alpha")
+    comparison_alpha = comparison.get("alpha") if isinstance(comparison, dict) else None
+    alpha_matches = (
+        isinstance(stored_alpha, (int, float))
+        and not isinstance(stored_alpha, bool)
+        and math.isclose(stored_alpha, current_alpha, rel_tol=1e-12, abs_tol=1e-15)
+        and isinstance(comparison_alpha, (int, float))
+        and not isinstance(comparison_alpha, bool)
+        and math.isclose(comparison_alpha, current_alpha, rel_tol=1e-12, abs_tol=1e-15)
+    )
+    if (
+        ablation.get("block") != block
+        or gate.get("candidates_in_family") != current_candidates
+        or not alpha_matches
+        or gate.get("multiple_comparison_method") != "bonferroni"
+        or gate.get("familywise_alpha") != FAMILYWISE_ALPHA
+        or gate.get("multiple_comparison_stale") is not False
+        or gate.get("bootstrap_resolution_sufficient") is not True
+        or gate.get("block_ablation_required") is not True
+        or gate.get("block_ablation_recorded") is not True
+        or gate.get("block_ablation_ci95_excludes_zero") is not True
+        or gate.get("block_ablation_adjusted_ci_excludes_zero") is not True
+        or not isinstance(comparison, dict)
+        or comparison.get("ci_resolution_sufficient") is not True
+        or not negative_ci_upper(comparison, "ci95")
+        or not negative_ci_upper(comparison, "ci")
+    ):
+        return None
+    return comparison
+
+
 def command_promote(args) -> dict:
     with connect(args.db) as db:
-        get_model(db, args.model_version)
-        row = db.execute(
-            "SELECT * FROM evaluation_runs WHERE kind = 'backtest' AND model_version = ? ORDER BY created_at DESC, rowid DESC LIMIT 1",
-            (args.model_version,),
-        ).fetchone()
-        if not row:
-            raise ValueError("Run backtest before promotion")
-        report = json.loads(row["report_json"])
-        gate = dict(report["promotion_gate"])
         model = get_model(db, args.model_version)
+        rows = db.execute(
+            "SELECT * FROM evaluation_runs WHERE kind = 'backtest' AND model_version = ? ORDER BY created_at DESC, rowid DESC",
+            (args.model_version,),
+        ).fetchall()
+        if not rows:
+            raise ValueError("Run backtest before promotion")
+        report_rows = [(row, json.loads(row["report_json"])) for row in rows]
+        row, report = report_rows[0]
+        gate = dict(report["promotion_gate"])
         current_candidates = db.execute(
             "SELECT COUNT(DISTINCT model_version) FROM evaluation_runs WHERE kind = 'backtest'"
         ).fetchone()[0]
@@ -1012,9 +1082,75 @@ def command_promote(args) -> dict:
         )
         if stale:
             gate["multiple_comparison_adjusted"] = False
-        ablation_missing = bool(model.get("feature_blocks")) and not gate.get("block_ablation_recorded")
-        if ablation_missing:
-            gate["block_ablation_missing"] = True
+
+        required_blocks, legacy_ablation_required = block_ablation_policy(model)
+        gate.pop("block_ablation_missing", None)
+        if required_blocks:
+            source_model_hash = payload_hash(model)
+            evidence: dict[str, str] = {}
+            evidence_comparisons = []
+            for block in required_blocks:
+                for evidence_row, evidence_report in report_rows:
+                    comparison = required_ablation_comparison(
+                        evidence_report, block, report, source_model_hash,
+                        current_candidates, current_alpha,
+                    )
+                    if comparison is not None:
+                        evidence[block] = evidence_row["evaluation_id"]
+                        evidence_comparisons.append(comparison)
+                        break
+            missing = [block for block in required_blocks if block not in evidence]
+            complete = not missing
+            gate["required_block_ablation_missing"] = missing
+            gate["required_block_ablation_evidence"] = evidence
+            gate["block_ablation_evidence_scope"] = "same-model-hash-and-evaluation-context"
+            gate["required_block_ablation_note"] = (
+                "逐個 required block 顯著只代表 individual necessity，唔代表 joint necessity。"
+            )
+            gate["block_ablation_required"] = True
+            gate["block_ablation_recorded"] = complete
+            gate["block_ablation_ci95_excludes_zero"] = complete
+            gate["block_ablation_adjusted_ci_excludes_zero"] = complete
+            gate["block_ablation_missing"] = bool(missing)
+
+            resolution_comparisons = [report.get("candidate_minus_baseline_logloss") or {}]
+            if gate.get("champion_comparison_required"):
+                resolution_comparisons.append(report.get("candidate_minus_champion_logloss") or {})
+            if gate.get("information_gain_required"):
+                resolution_comparisons.append(report.get("information_gain_vs_market") or {})
+            resolution_comparisons.extend(evidence_comparisons)
+            resolution_sufficient = all(
+                item.get("ci_resolution_sufficient") is True for item in resolution_comparisons
+            )
+            resolution_warning = next(
+                (item.get("ci_warning") for item in resolution_comparisons if item.get("ci_warning")),
+                None,
+            )
+            if not resolution_sufficient and resolution_warning is None:
+                resolution_warning = "Adjusted bootstrap CI evidence is unavailable."
+            gate["bootstrap_resolution_sufficient"] = resolution_sufficient
+            gate["bootstrap_resolution_warning"] = resolution_warning
+            champion_adjusted = True
+            if gate.get("champion_comparison_required"):
+                champion_adjusted = (
+                    gate.get("beats_current_champion") is True
+                    and gate.get("champion_improvement_adjusted_ci_excludes_zero") is True
+                )
+            gate["multiple_comparison_adjusted"] = bool(
+                not stale
+                and resolution_sufficient
+                and gate.get("logloss_improvement_adjusted_ci_excludes_zero") is True
+                and champion_adjusted
+                and (
+                    gate.get("information_gain_adjusted_ci_excludes_zero") is True
+                    if gate.get("information_gain_required") else True
+                )
+                and complete
+            )
+        elif legacy_ablation_required:
+            gate["block_ablation_required"] = True
+            gate["block_ablation_missing"] = not gate.get("block_ablation_recorded")
+
         gate["eligible"] = promotion_eligible(gate)
         event_type = "promoted" if gate["eligible"] else "rejected"
         event_id = "me_" + uuid.uuid4().hex
@@ -1084,21 +1220,17 @@ def command_value_backtest(args) -> dict:
     return report
 
 
-def collect_oof_points(records: list[dict], template: dict, *, refit_every: int, min_train_races: int) -> list[tuple[float, int]]:
-    """Walk-forward probabilities labelled by whether the runner won."""
-    indices = list(range(min_train_races, len(records)))
-    points: list[tuple[float, int]] = []
-    for record, prediction in walk_forward_predictions(records, template, indices, refit_every):
-        winners = {
-            int(row["horse_no"])
-            for row in record["result"]["results"]
-            if row.get("finish_position") == 1
-        }
-        for item in prediction["runners"]:
-            points.append(
-                (float(item["win_probability"]), 1 if int(item["horse_no"]) in winners else 0)
-            )
-    return points
+def prediction_calibration_points(record: dict, prediction: dict) -> list[tuple[float, int]]:
+    """Flatten one race's probabilities without losing race-grouped normalisation."""
+    winners = {
+        int(row["horse_no"])
+        for row in record["result"]["results"]
+        if row.get("finish_position") == 1
+    }
+    return [
+        (float(item["win_probability"]), 1 if int(item["horse_no"]) in winners else 0)
+        for item in prediction["runners"]
+    ]
 
 
 def command_calibrate(args) -> dict:
@@ -1107,24 +1239,62 @@ def command_calibrate(args) -> dict:
         if db.execute("SELECT 1 FROM models WHERE model_version = ?", (args.new_version,)).fetchone():
             raise ValueError("new_version already exists; pick a fresh calibration version")
         train_before = source.get("train_before")
-        records = load_records(db, train_before=train_before)
-        if len(records) < args.min_train_races + 2:
+        if not train_before:
+            raise ValueError("Source model has no train_before boundary for post-training calibration")
+        records = load_records(db)
+        pre_records = [
+            record for record in records
+            if record["card"]["race"]["meeting_date"] < train_before
+        ]
+        post_records = [
+            record for record in records
+            if record["card"]["race"]["meeting_date"] >= train_before
+        ]
+        if len(pre_records) < args.min_train_races:
             raise ValueError(
-                f"Need at least {args.min_train_races + 2} completed races to collect out-of-fold predictions; "
-                f"found {len(records)}"
+                f"Need {args.min_train_races} completed source-training races before {train_before}; "
+                f"found {len(pre_records)}"
             )
-        template = {key: value for key, value in source.items() if key in {"features", "hyperparameters"}}
-        points = collect_oof_points(
-            records, template, refit_every=args.refit_every, min_train_races=args.min_train_races
-        )
-        if len(points) < args.min_samples:
+        if len(post_records) < 2:
             raise ValueError(
-                f"Need at least {args.min_samples} out-of-fold runner predictions; found {len(points)}"
+                f"Need at least 2 completed races on or after {train_before} for calibration fitting "
+                f"and a later evaluation holdout; found {len(post_records)}; "
+                f"add at least {2 - len(post_records)} more post-training races"
             )
-        scores = [point[0] for point in points]
-        labels = [point[1] for point in points]
+
+        raw_source = dict(source)
+        raw_source.pop("calibration", None)
+        post_predictions = [
+            (record, predict_card(record["card"], raw_source, args.model_version))
+            for record in post_records
+        ]
+        evaluation_count = max(1, math.ceil(len(post_predictions) * 0.25))
+        fit_predictions = post_predictions[:-evaluation_count]
+        evaluation_predictions = post_predictions[-evaluation_count:]
+        fit_points = [
+            point
+            for record, prediction in fit_predictions
+            for point in prediction_calibration_points(record, prediction)
+        ]
+        if len(fit_points) < args.min_samples:
+            raise ValueError(
+                f"Need at least {args.min_samples} post-training fit runner predictions; "
+                f"found {len(fit_points)} ({args.min_samples - len(fit_points)} more needed) "
+                f"across {len(fit_predictions)} fit races and "
+                f"{len(evaluation_predictions)} evaluation races from "
+                f"{len(post_predictions)} post-training races. "
+                "At least 1 more completed post-training race is needed; "
+                "the exact additional race count depends on future field sizes, "
+                "and the latest 25% of post-training races remain reserved for ECE evaluation"
+            )
+
+        scores = [point[0] for point in fit_points]
+        labels = [point[1] for point in fit_points]
         fitted = isotonic_fit(scores, labels) if args.method == "isotonic" else platt_fit(scores, labels)
-        before = expected_calibration_error(points)
+        fit_race_ids = [record["card"]["race"]["race_id"] for record, _ in fit_predictions]
+        evaluation_race_ids = [
+            record["card"]["race"]["race_id"] for record, _ in evaluation_predictions
+        ]
         model = dict(source)
         model.update(
             {
@@ -1134,15 +1304,41 @@ def command_calibrate(args) -> dict:
                 "calibration": {
                     "method": args.method,
                     "model": fitted,
-                    "samples": len(points),
-                    "source": "out-of-fold",
-                    "ece_before": before,
+                    "samples": len(fit_points),
+                    "evaluation_samples": 0,
+                    "post_train_samples": len(fit_points),
+                    "source": "post-train-out-of-sample",
+                    "train_before": train_before,
+                    "fit_race_count": len(fit_predictions),
+                    "evaluation_race_count": len(evaluation_predictions),
+                    "post_train_race_count": len(post_predictions),
+                    "fit_race_ids": fit_race_ids,
+                    "evaluation_race_ids": evaluation_race_ids,
+                    "fit_period": {
+                        "first_meeting_date": fit_predictions[0][0]["card"]["race"]["meeting_date"],
+                        "last_meeting_date": fit_predictions[-1][0]["card"]["race"]["meeting_date"],
+                    },
+                    "evaluation_period": {
+                        "first_meeting_date": evaluation_predictions[0][0]["card"]["race"]["meeting_date"],
+                        "last_meeting_date": evaluation_predictions[-1][0]["card"]["race"]["meeting_date"],
+                    },
                 },
             }
         )
-        after_points = [
-            (apply_calibration(model, [score])[0], label) for score, label in points
-        ]
+
+        before_points: list[tuple[float, int]] = []
+        after_points: list[tuple[float, int]] = []
+        for record, prediction in evaluation_predictions:
+            race_points = prediction_calibration_points(record, prediction)
+            before_points.extend(race_points)
+            adjusted = apply_calibration(model, [point[0] for point in race_points])
+            after_points.extend(
+                (probability, point[1])
+                for probability, point in zip(adjusted, race_points)
+            )
+        model["calibration"]["evaluation_samples"] = len(before_points)
+        model["calibration"]["post_train_samples"] = len(fit_points) + len(before_points)
+        model["calibration"]["ece_before"] = expected_calibration_error(before_points)
         model["calibration"]["ece_after"] = expected_calibration_error(after_points)
         db.execute(
             "INSERT INTO models VALUES (?, ?, ?, ?)",
@@ -1153,7 +1349,14 @@ def command_calibrate(args) -> dict:
             "INSERT INTO model_events VALUES (?, ?, ?, ?, ?)",
             (
                 event_id, args.new_version, "calibrated", now_iso(),
-                canonical({"calibrated_from": args.model_version, "method": args.method, "samples": len(points)}),
+                canonical({
+                    "calibrated_from": args.model_version,
+                    "method": args.method,
+                    "samples": len(fit_points),
+                    "evaluation_samples": len(before_points),
+                    "fit_race_ids": fit_race_ids,
+                    "evaluation_race_ids": evaluation_race_ids,
+                }),
             ),
         )
     return model["calibration"] | {"model_version": args.new_version}
@@ -1269,7 +1472,8 @@ def build_parser() -> argparse.ArgumentParser:
     value.add_argument("--output")
 
     calibrate = sub.add_parser(
-        "calibrate", help="Fit an out-of-fold calibration layer and store it as a new model version"
+        "calibrate",
+        help="Fit post-training calibration and evaluate it on a later holdout",
     )
     calibrate.add_argument("--db", required=True)
     calibrate.add_argument("--model-version", required=True)
@@ -1277,7 +1481,6 @@ def build_parser() -> argparse.ArgumentParser:
     calibrate.add_argument("--method", choices=["isotonic", "platt"], default="isotonic")
     calibrate.add_argument("--min-train-races", type=int, default=50)
     calibrate.add_argument("--min-samples", type=int, default=200)
-    calibrate.add_argument("--refit-every", type=int, default=5)
     calibrate.add_argument("--output")
 
     promote = sub.add_parser("promote", help="Promote only an eligible model; otherwise record rejection")

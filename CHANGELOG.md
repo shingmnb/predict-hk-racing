@@ -28,8 +28,8 @@
 
 ### Added (gate semantics & calibration)
 
-- `calibrate`：用 walk-forward 的 out-of-fold 預測擬合 isotonic/Platt，存成新版本；`predict` 自動套用並報 `ece_before`/`ece_after`。
-- `fit --required-block`：特徵塊分 required／optional；gate 只強制 required block 的 ablation，optional 未通過記入 `optional_blocks_unproven`。
+- `calibrate`：固定 source model，只用 `train_before` 之後嘅場次擬合 isotonic/Platt；最後 25% 窗後場次做獨立 ECE holdout，逐場套用校準並記錄 fit／evaluation 樣本與場次，存成新版本。
+- `fit --required-block`：特徵塊分 required／optional；`promote` 可累積多個 required blocks 嘅同模型 hash、同窗口／配置、同家族顯著 ablation，並保存 evaluation ids；optional 未通過只記錄，唔否決模型。舊模型保留 latest-only ablation gate。
 - 推廣 gate 標註 `information_gain_note`：Δf² 係 log loss 差的單調變換，唔算獨立證據。
 
 ## [0.2.0] - 2026-10-24

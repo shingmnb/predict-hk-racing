@@ -116,7 +116,9 @@ python "<SKILL>/scripts/racing_lab.py" predict \
 
 ## 校準與特徵塊
 
-有足夠 out-of-fold 樣本就跑 `calibrate`（用新版本名，例如 `-cal`）；`predict` 會自動套用並在輸出報 `calibration`。特徵塊分 required／optional：只有 required 要 ablation 通過；optional 未通過就由最終特徵集剔除，唔好因此否決整個模型。
+有足夠訓練窗後樣本就跑 `calibrate`（用新版本名，例如 `-cal`）：固定 source model 對 `train_before` 之後嘅場次預測，較早場次擬合校準器，最後 25% 場次獨立計 `ece_before`／`ece_after`；唔夠新數據會報錯，唔會退回訓練窗。`predict` 會自動逐場套用並在輸出報 `calibration`。
+
+特徵塊分 required／optional：每個 required 都要喺同一模型 hash、回測窗口／配置、champion 同候選家族下各自 ablation 通過，`promote` 先會累積認可；呢個係 per-block necessity，唔代表聯合必要性。optional 未通過只記入 `optional_blocks_unproven`，唔會否決模型，亦唔會自動改特徵集；要剔除就另 fit 一個移除該塊嘅新版本。
 
 ## 價值與選擇性使用
 
