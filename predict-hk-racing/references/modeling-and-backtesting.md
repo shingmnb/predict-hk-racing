@@ -37,6 +37,12 @@ gain["delta"], gain["ci95"]              # Δf² 同 95% bootstrap 區間
 
 > 注意：Δf² 係相對市場的資訊優勢，唔等於 ROI。要賺錢仍然要過抽水 — 各池抽水唔同：WIN 池 17.5%（PR #13 拍板）；place/QIN/QPL 待 T-60 實測核實官方 takeout 表（issue #22），唔可以套用 WIN 數字。
 
+> **Δf² 唔係獨立證據**：`pseudo_r2 = 1 − logloss / log(field)`，所以對同一批場次，
+> `Δf² = (LL_market − LL_candidate) / mean(log field)`，分母恆正——每一個 bootstrap
+> resample 內，Δf² 與 log loss 差**同符號**。即係話 `--require-information-gain` 同
+> `logloss_improvement_adjusted_ci_excludes_zero` 實際上係同一個判斷（換了單位）。
+> 要第二個獨立 gate，應該用正交指標：CLV、校準誤差、或 value-backtest 的 ROI CI。
+
 ## 機率校準層（isotonic / Platt）
 
 **去水 ≠ 校準。** Shin 只係移除書商水位，模型輸出仍然可能系統性過度自信或不足。校準層負責把 raw probability 映射到實際命中率。
@@ -44,16 +50,16 @@ gain["delta"], gain["ci95"]              # Δf² 同 95% bootstrap 區間
 ```python
 from racing_model import isotonic_fit, isotonic_apply, platt_fit, platt_apply, expected_calibration_error
 
-model = isotonic_fit(oof_probs, oof_labels)   # PAVA，單調非遞減
+model = isotonic_fit(post_fit_probs, post_fit_labels)   # PAVA，單調非遞減
 p_cal = isotonic_apply(model, raw_prob)
 
-platt = platt_fit(oof_probs, oof_labels)      # sigmoid(a·logit(p)+b)
+platt = platt_fit(post_fit_probs, post_fit_labels)      # sigmoid(a·logit(p)+b)
 p_cal = platt_apply(platt, raw_prob)
 
-ece = expected_calibration_error(list(zip(oof_probs, oof_labels)))
+ece = expected_calibration_error(list(zip(later_holdout_probs, later_holdout_labels)))
 ```
 
-**最重要的紀律：校準模型只可以用 out-of-fold 預測擬合。** 用 in-sample 預測擬合會把賽果泄漏入校準器，令校準看起來完美但實際失效。做法：walk-forward 每個窗口用之前窗口訓練、當前窗口預測，收集所有 OOF 預測後才 fit 一次。
+**最重要的紀律：校準分數必須對部署 source model 屬時間外樣本。** `calibrate` 固定未校準嘅 source model，只用 `meeting_date >= train_before` 嘅已完成場次；唔會 walk-forward refit 另一個 fold model，亦唔會退回訓練窗。窗後較早場次用嚟擬合，最後 25%（至少一場）留作較後 holdout，`ece_before`／`ece_after` 共用呢批獨立評估點，唔重用 fit points。套用校準時必須逐場處理全場概率再 normalise，唔可以逐匹單點套用。
 
 - `isotonic`：非參數、樣本多時較準；小樣本（<500 點）容易階梯化，建議配 `n ≥ 300`。
 - `platt`：兩個參數、小樣本穩定，但只能修正單調壓縮，修正不了非單調偏差。
@@ -142,8 +148,8 @@ model["training"]["best_epoch"], model["training"]["validation_logloss"]
    - 對市場 log loss 改善嘅原始 bootstrap 95% 區間上端低於 0，且 Bonferroni 調整後（`effective_alpha = 0.05 / candidates_in_family`）區間上端亦低於 0；
    - 有現任 champion 時，亦要優於 champion，且對 champion 改善嘅原始同調整後區間上端都低於 0；
    - 要求 information gain 時，`information_gain_ci95_excludes_zero` 成立，且調整後區間下端亦高於 0；
-   - 宣告特徵塊時，配對 ablation 已完整記錄，且 ablation 原始同調整後區間上端都低於 0；
-   - bootstrap 解析度不足時，adjusted CI 必須留空並記錄 warning，候選版本不得晉升；要增加 `--bootstrap`，或喺睇結果前按登記準則收窄候選家族再重跑；
+   - 每個 required block 都要有完整配對 ablation，原始同調整後區間上端都低於 0；`promote` 只會累積 source model hash、回測方法／窗口、champion、candidate／baseline／逐場數據、候選家族數同 effective alpha 全部一致嘅證據，並記錄每個 block 對應嘅 evaluation id。呢個係 per-block necessity，唔代表 joint necessity；optional block 只記錄未證明價值，要剔除就另 fit 新版本。舊模型冇 `required_blocks` key 時，保留「latest backtest 要有顯著 ablation」嘅舊閘門；
+   - 用嚟入閘嘅 comparison（市場、champion、按需 Δf² 同 required ablation）bootstrap 解析度不足時，adjusted CI 必須留空並記錄 warning，候選版本不得晉升；optional ablation 唔會否決模型。要增加 `--bootstrap`，或喺睇結果前按登記準則收窄候選家族再重跑；
    - 閘門證據必須 `multiple_comparison_method = "bonferroni"`、`familywise_alpha = 0.05`、`effective_alpha` 同 0.05/n 一致；候選家族改變 → `multiple_comparison_stale` → 拒絕並要求重跑 backtest；舊版報告缺呢啲欄位一律拒絕，冇人手覆寫。
 5. 未通過就記錄 `rejected`，繼續用舊版或市場基準。將新想法列為候選假設，唔好即場改投注規則。
 6. 通過後先記錄 `promoted`；`predict --model-version auto` 會用最新 promoted，冇 promoted 就用市場基準。

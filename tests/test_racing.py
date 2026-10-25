@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 
 sys.dont_write_bytecode = True
@@ -19,6 +20,7 @@ from domain import derive_place_slots, quote_supported  # noqa: E402
 from decision import payout_odds, settle_stream  # noqa: E402
 from staking import edge, kelly_fraction, plan_race, stake_size  # noqa: E402
 from racing_model import (  # noqa: E402
+    apply_calibration,
     assess_intent,
     bootstrap_logloss_difference,
     expected_calibration_error,
@@ -31,10 +33,11 @@ from racing_model import (  # noqa: E402
     place_probabilities,
     platt_apply,
     platt_fit,
+    predict_card,
     pseudo_r2,
     shin_probabilities,
 )
-from racing_lab import promotion_eligible  # noqa: E402
+from racing_lab import payload_hash, promotion_eligible  # noqa: E402
 
 CLI = SCRIPTS / "racing_lab.py"
 
@@ -142,6 +145,20 @@ class ModelUnitTests(unittest.TestCase):
         self.assertAlmostEqual(expected_calibration_error([(1.0, 0)]), 1.0)
         with self.assertRaises(ValueError):
             expected_calibration_error([])
+
+    def test_calibration_is_applied_per_race_not_per_runner(self):
+        model = {"calibration": {"method": "platt", "model": {"a": 2.0, "b": 0.0}}}
+        scores = [0.8, 0.2]
+        labels = [1, 0]
+        grouped = apply_calibration(model, scores)
+        singleton = [apply_calibration(model, [score])[0] for score in scores]
+        self.assertAlmostEqual(sum(grouped), 1.0)
+        self.assertGreater(grouped[0], 0.8)
+        self.assertEqual(singleton, [1.0, 1.0])
+        grouped_ece = expected_calibration_error(list(zip(grouped, labels)))
+        singleton_ece = expected_calibration_error(list(zip(singleton, labels)))
+        self.assertAlmostEqual(singleton_ece, 0.5)
+        self.assertLess(grouped_ece, singleton_ece)
 
     def test_pseudo_r2_matches_mcfadden(self):
         rows = [{"logloss": 0.5, "runner_count": 10} for _ in range(5)]
@@ -859,6 +876,135 @@ class PipelineIntegrationTests(unittest.TestCase):
             self.run_cli("import-result", "--db", self.db, "--file", result_path)
         return dates
 
+    def insert_synthetic_model(self, version, required_blocks=None):
+        model = {
+            "algorithm": "conditional-logit-v1",
+            "model_version": version,
+            "created_at": "2026-08-08T00:00:00+00:00",
+            "features": ["market_logp", "intent_centered", "rating"],
+            "feature_blocks": {
+                "intent": ["intent_centered"],
+                "rating": ["rating"],
+            },
+        }
+        if required_blocks is not None:
+            model["required_blocks"] = required_blocks
+        with closing(sqlite3.connect(self.db)) as connection, connection:
+            connection.execute(
+                "INSERT INTO models(model_version, created_at, algorithm, config_json) VALUES (?, ?, ?, ?)",
+                (version, model["created_at"], model["algorithm"], json.dumps(model)),
+            )
+        return model
+
+    def insert_synthetic_backtest(
+        self,
+        model,
+        evaluation_id,
+        created_at,
+        ablation_block=None,
+        window="2026-08-06",
+        family_count=1,
+        source_hash=None,
+    ):
+        alpha = 0.05 / family_count
+        required = model.get("required_blocks", [])
+        legacy_required = "required_blocks" not in model and bool(model.get("feature_blocks"))
+        ablation_recorded = ablation_block is not None
+        gate = {
+            "enough_test_races": True,
+            "logloss_beats_market_baseline": True,
+            "brier_not_worse_than_market": True,
+            "logloss_improvement_ci95_excludes_zero": True,
+            "logloss_improvement_adjusted_ci_excludes_zero": True,
+            "champion_comparison_required": False,
+            "champion_improvement_ci95_excludes_zero": True,
+            "champion_improvement_adjusted_ci_excludes_zero": True,
+            "beats_current_champion": True,
+            "information_gain_required": False,
+            "information_gain_positive": True,
+            "information_gain_ci95_excludes_zero": True,
+            "information_gain_adjusted_ci_excludes_zero": True,
+            "block_ablation_required": legacy_required or ablation_block in required,
+            "required_blocks": required,
+            "required_block_ablation_missing": [
+                name for name in required if name != ablation_block
+            ],
+            "block_ablation_recorded": ablation_recorded,
+            "block_ablation_ci95_excludes_zero": ablation_recorded,
+            "block_ablation_adjusted_ci_excludes_zero": ablation_recorded,
+            "bootstrap_resolution_sufficient": True,
+            "bootstrap_resolution_warning": None,
+            "candidates_backtested": family_count,
+            "candidates_in_family": family_count,
+            "familywise_alpha": 0.05,
+            "effective_alpha": alpha,
+            "multiple_comparison_method": "bonferroni",
+            "multiple_comparison_adjusted": True,
+            "multiple_comparison_stale": False,
+        }
+        gate["eligible"] = promotion_eligible(gate)
+        comparison = None
+        ablation = None
+        if ablation_recorded:
+            comparison = {
+                "ci95": [-0.20, -0.05],
+                "ci": [-0.25, -0.04],
+                "alpha": alpha,
+                "ci_resolution_sufficient": True,
+                "ci_warning": None,
+            }
+            ablation = {
+                "block": ablation_block,
+                "candidate_minus_without_block": comparison,
+            }
+        report = {
+            "kind": "walk-forward-backtest-v1",
+            "model_version": model["model_version"],
+            "source_model_hash": source_hash or payload_hash(model),
+            "champion_version": None,
+            "method": {
+                "validation": "expanding-window walk-forward; every fit uses races before the test race only",
+                "refit_every_races": 2,
+                "min_train_races": 5,
+                "test_after": window,
+                "test_before": None,
+                "bootstrap_samples": 1000,
+            },
+            "candidate": {"logloss": 0.4, "brier": 0.2, "race_count": 2},
+            "market_baseline": {"logloss": 0.5, "brier": 0.25, "race_count": 2},
+            "candidate_minus_baseline_logloss": {
+                "ci95": [-0.20, -0.05],
+                "ci": [-0.25, -0.04],
+                "alpha": alpha,
+                "ci_resolution_sufficient": True,
+                "ci_warning": None,
+            },
+            "information_gain_vs_market": {
+                "ci_resolution_sufficient": True,
+                "ci_warning": None,
+            },
+            "champion": None,
+            "candidate_minus_champion_logloss": None,
+            "ablation": ablation,
+            "promotion_gate": gate,
+            "per_race": [{
+                "candidate": {"race_id": "synthetic-race", "logloss": 0.4},
+                "market_baseline": {"race_id": "synthetic-race", "logloss": 0.5},
+            }],
+        }
+        with closing(sqlite3.connect(self.db)) as connection, connection:
+            connection.execute(
+                "INSERT INTO evaluation_runs VALUES (?, ?, ?, ?, ?)",
+                (
+                    evaluation_id,
+                    "backtest",
+                    model["model_version"],
+                    created_at,
+                    json.dumps(report),
+                ),
+            )
+        return report
+
     def test_value_backtest_settles_against_dividends(self):
         self.run_cli("init", "--db", self.db)
         self.build_history(1, 8)
@@ -991,7 +1137,7 @@ class PipelineIntegrationTests(unittest.TestCase):
         self.run_cli(
             "fit", "--db", self.db, "--model-version", "abl-v1",
             "--features", "market_logp,intent_centered,rating",
-            "--block", "intent=intent_centered",
+            "--block", "intent=intent_centered", "--required-block", "intent",
             "--train-before", "2026-08-08", "--min-races", 6, "--epochs", 40,
         )
         with_ablation = json.loads(
@@ -1025,7 +1171,7 @@ class PipelineIntegrationTests(unittest.TestCase):
         self.run_cli(
             "fit", "--db", self.db, "--model-version", "abl-v2",
             "--features", "market_logp,intent_centered,rating",
-            "--block", "intent=intent_centered",
+            "--block", "intent=intent_centered", "--required-block", "intent",
             "--train-before", "2026-08-08", "--min-races", 6, "--epochs", 20,
         )
         without_ablation = json.loads(
@@ -1064,6 +1210,324 @@ class PipelineIntegrationTests(unittest.TestCase):
             "--allow-missing-ablation", ok=False,
         )
         self.assertIn("unrecognized arguments", bypass.stderr)
+
+    def test_undeclared_required_block_is_rejected(self):
+        self.run_cli("init", "--db", self.db)
+        self.build_history(1, 3)
+        failed = self.run_cli(
+            "fit", "--db", self.db, "--model-version", "undeclared-required",
+            "--features", "market_logp", "--required-block", "intent",
+            "--train-before", "2026-08-04", "--min-races", 2, "--epochs", 5,
+            ok=False,
+        )
+        self.assertIn("Required blocks were never declared: intent", failed.stderr)
+        with closing(sqlite3.connect(self.db)) as connection, connection:
+            count = connection.execute(
+                "SELECT COUNT(*) FROM models WHERE model_version = 'undeclared-required'"
+            ).fetchone()[0]
+        self.assertEqual(count, 0)
+
+    def test_two_required_blocks_promote_after_both_ablations(self):
+        self.run_cli("init", "--db", self.db)
+        model = self.insert_synthetic_model("two-required", ["intent", "rating"])
+        self.insert_synthetic_backtest(
+            model, "ev-intent", "2026-08-09T00:00:01+00:00", "intent"
+        )
+        first = json.loads(
+            self.run_cli("promote", "--db", self.db, "--model-version", "two-required").stdout
+        )
+        self.assertEqual(first["event"], "rejected")
+        self.assertEqual(first["promotion_gate"]["required_block_ablation_missing"], ["rating"])
+        self.assertEqual(
+            first["promotion_gate"]["required_block_ablation_evidence"],
+            {"intent": "ev-intent"},
+        )
+
+        self.insert_synthetic_backtest(
+            model, "ev-rating", "2026-08-09T00:00:02+00:00", "rating"
+        )
+        second = json.loads(
+            self.run_cli("promote", "--db", self.db, "--model-version", "two-required").stdout
+        )
+        self.assertEqual(second["event"], "promoted")
+        self.assertTrue(second["promotion_gate"]["eligible"])
+        self.assertEqual(second["promotion_gate"]["required_block_ablation_missing"], [])
+        self.assertEqual(
+            second["promotion_gate"]["required_block_ablation_evidence"],
+            {"intent": "ev-intent", "rating": "ev-rating"},
+        )
+
+    def test_required_ablation_rejects_other_windows_stale_family_and_model_hash(self):
+        self.run_cli("init", "--db", self.db)
+        model = self.insert_synthetic_model("required-context", ["intent", "rating"])
+        self.insert_synthetic_backtest(
+            model, "ev-intent-other-window", "2026-08-09T00:00:01+00:00",
+            "intent", window="2026-08-05",
+        )
+        self.insert_synthetic_backtest(
+            model, "ev-rating-current-window", "2026-08-09T00:00:02+00:00",
+            "rating", window="2026-08-06",
+        )
+        different_window = json.loads(
+            self.run_cli("promote", "--db", self.db, "--model-version", "required-context").stdout
+        )
+        self.assertEqual(different_window["event"], "rejected")
+        self.assertEqual(
+            different_window["promotion_gate"]["required_block_ablation_evidence"],
+            {"rating": "ev-rating-current-window"},
+        )
+        self.assertEqual(
+            different_window["promotion_gate"]["required_block_ablation_missing"], ["intent"]
+        )
+
+        self.insert_synthetic_backtest(
+            model, "ev-intent-stale-family", "2026-08-09T00:00:03+00:00",
+            "intent", window="2026-08-06", family_count=2,
+        )
+        stale = json.loads(
+            self.run_cli("promote", "--db", self.db, "--model-version", "required-context").stdout
+        )
+        self.assertEqual(stale["event"], "rejected")
+        self.assertTrue(stale["promotion_gate"]["multiple_comparison_stale"])
+        self.assertEqual(stale["promotion_gate"]["required_block_ablation_missing"], ["intent"])
+
+        self.insert_synthetic_backtest(
+            model, "ev-intent-wrong-model", "2026-08-09T00:00:04+00:00",
+            "intent", window="2026-08-06", source_hash="not-the-current-model",
+        )
+        wrong_model = json.loads(
+            self.run_cli("promote", "--db", self.db, "--model-version", "required-context").stdout
+        )
+        self.assertEqual(wrong_model["event"], "rejected")
+        self.assertFalse(wrong_model["promotion_gate"]["multiple_comparison_stale"])
+        self.assertEqual(wrong_model["promotion_gate"]["required_block_ablation_missing"], ["intent"])
+        self.assertEqual(
+            wrong_model["promotion_gate"]["required_block_ablation_evidence"],
+            {"rating": "ev-rating-current-window"},
+        )
+
+    def test_legacy_block_ablation_remains_latest_only(self):
+        self.run_cli("init", "--db", self.db)
+        model = self.insert_synthetic_model("legacy-ablation")
+        self.insert_synthetic_backtest(
+            model, "ev-legacy-earlier", "2026-08-09T00:00:01+00:00", "intent"
+        )
+        self.insert_synthetic_backtest(
+            model, "ev-legacy-latest-missing", "2026-08-09T00:00:02+00:00"
+        )
+        rejected = json.loads(
+            self.run_cli("promote", "--db", self.db, "--model-version", "legacy-ablation").stdout
+        )
+        self.assertEqual(rejected["event"], "rejected")
+        self.assertTrue(rejected["promotion_gate"]["block_ablation_missing"])
+
+        self.insert_synthetic_backtest(
+            model, "ev-legacy-latest-pass", "2026-08-09T00:00:03+00:00", "intent"
+        )
+        promoted = json.loads(
+            self.run_cli("promote", "--db", self.db, "--model-version", "legacy-ablation").stdout
+        )
+        self.assertEqual(promoted["event"], "promoted")
+        self.assertTrue(promoted["promotion_gate"]["eligible"])
+
+    def test_explicit_optional_model_has_no_ablation_gate(self):
+        self.run_cli("init", "--db", self.db)
+        model = self.insert_synthetic_model("explicit-optional", [])
+        self.insert_synthetic_backtest(
+            model, "ev-optional", "2026-08-09T00:00:01+00:00"
+        )
+        promotion = json.loads(
+            self.run_cli("promote", "--db", self.db, "--model-version", "explicit-optional").stdout
+        )
+        self.assertEqual(promotion["event"], "promoted")
+        self.assertTrue(promotion["promotion_gate"]["eligible"])
+        self.assertNotIn("block_ablation_missing", promotion["promotion_gate"])
+
+    def test_optional_block_does_not_gate_promotion(self):
+        self.run_cli("init", "--db", self.db)
+        self.build_history(1, 10)
+        self.run_cli(
+            "fit", "--db", self.db, "--model-version", "opt-v1",
+            "--features", "market_logp,intent_centered,rating",
+            "--block", "intent=intent_centered",
+            "--train-before", "2026-08-08", "--min-races", 6, "--epochs", 20,
+        )
+        report = json.loads(
+            self.run_cli(
+                "backtest", "--db", self.db, "--model-version", "opt-v1",
+                "--min-train-races", 5, "--min-test-races", 2, "--refit-every", 2,
+                "--test-after", "2026-08-06", "--bootstrap", 50,
+            ).stdout
+        )
+        gate = report["promotion_gate"]
+        self.assertEqual(gate["required_blocks"], [])
+        self.assertFalse(gate["block_ablation_required"])
+        self.assertEqual(gate["required_block_ablation_missing"], [])
+
+    def test_required_block_needs_ablation_before_promotion(self):
+        self.run_cli("init", "--db", self.db)
+        self.build_history(1, 10)
+        self.run_cli(
+            "fit", "--db", self.db, "--model-version", "req-v1",
+            "--features", "market_logp,intent_centered,rating",
+            "--block", "intent=intent_centered", "--required-block", "intent",
+            "--train-before", "2026-08-08", "--min-races", 6, "--epochs", 20,
+        )
+        report = json.loads(
+            self.run_cli(
+                "backtest", "--db", self.db, "--model-version", "req-v1",
+                "--min-train-races", 5, "--min-test-races", 2, "--refit-every", 2,
+                "--test-after", "2026-08-06", "--bootstrap", 50,
+            ).stdout
+        )
+        gate = report["promotion_gate"]
+        self.assertEqual(gate["required_blocks"], ["intent"])
+        self.assertEqual(gate["required_block_ablation_missing"], ["intent"])
+        self.assertFalse(gate["eligible"])
+        promotion = json.loads(
+            self.run_cli("promote", "--db", self.db, "--model-version", "req-v1").stdout
+        )
+        self.assertEqual(promotion["event"], "rejected")
+
+    def test_calibrate_creates_version_and_predict_applies_it(self):
+        self.run_cli("init", "--db", self.db)
+        self.build_history(1, 20)
+        self.run_cli(
+            "fit", "--db", self.db, "--model-version", "cal-base",
+            "--features", "market_logp,rating", "--train-before", "2026-08-12",
+            "--min-races", 8, "--epochs", 40,
+        )
+        calibration = json.loads(
+            self.run_cli(
+                "calibrate", "--db", self.db, "--model-version", "cal-base",
+                "--new-version", "cal-base-cal", "--method", "isotonic",
+                "--min-train-races", 6, "--min-samples", 20,
+            ).stdout
+        )
+        self.assertEqual(calibration["method"], "isotonic")
+        self.assertEqual(calibration["source"], "post-train-out-of-sample")
+        self.assertEqual(calibration["train_before"], "2026-08-12")
+        self.assertEqual(calibration["samples"], 30)
+        self.assertEqual(calibration["evaluation_samples"], 15)
+        self.assertEqual(calibration["post_train_samples"], 45)
+        self.assertEqual(calibration["fit_race_count"], 6)
+        self.assertEqual(calibration["evaluation_race_count"], 3)
+        self.assertEqual(calibration["post_train_race_count"], 9)
+        self.assertEqual(
+            calibration["fit_race_ids"],
+            [f"2026-08-{day:02d}-ST-R1" for day in range(12, 18)],
+        )
+        self.assertEqual(
+            calibration["evaluation_race_ids"],
+            [f"2026-08-{day:02d}-ST-R1" for day in range(18, 21)],
+        )
+        self.assertTrue(set(calibration["fit_race_ids"]).isdisjoint(calibration["evaluation_race_ids"]))
+
+        before_points = []
+        after_points = []
+        with closing(sqlite3.connect(self.db)) as connection, connection:
+            source = json.loads(connection.execute(
+                "SELECT config_json FROM models WHERE model_version = 'cal-base'"
+            ).fetchone()[0])
+            calibrated = json.loads(connection.execute(
+                "SELECT config_json FROM models WHERE model_version = 'cal-base-cal'"
+            ).fetchone()[0])
+            for race_id in calibration["evaluation_race_ids"]:
+                card = json.loads(connection.execute(
+                    "SELECT payload_json FROM card_snapshots WHERE race_id = ? "
+                    "ORDER BY captured_at DESC, rowid DESC LIMIT 1",
+                    (race_id,),
+                ).fetchone()[0])
+                result = json.loads(connection.execute(
+                    "SELECT payload_json FROM result_snapshots WHERE race_id = ? "
+                    "ORDER BY recorded_at DESC, rowid DESC LIMIT 1",
+                    (race_id,),
+                ).fetchone()[0])
+                prediction = predict_card(card, source)
+                winners = {
+                    int(row["horse_no"]) for row in result["results"]
+                    if row.get("finish_position") == 1
+                }
+                race_before = [
+                    (float(item["win_probability"]), 1 if int(item["horse_no"]) in winners else 0)
+                    for item in prediction["runners"]
+                ]
+                race_after = apply_calibration(
+                    calibrated, [point[0] for point in race_before]
+                )
+                before_points.extend(race_before)
+                after_points.extend(
+                    (probability, point[1])
+                    for probability, point in zip(race_after, race_before)
+                )
+        self.assertEqual(len(before_points), calibration["evaluation_samples"])
+        self.assertAlmostEqual(
+            calibration["ece_before"], expected_calibration_error(before_points)
+        )
+        self.assertAlmostEqual(
+            calibration["ece_after"], expected_calibration_error(after_points)
+        )
+
+        card, _ = self.make_card("2026-12-01", live=True)
+        card_path = self.base / "cards" / "cal.json"
+        self.dump(card_path, card)
+        self.run_cli("import-card", "--db", self.db, "--file", card_path)
+        prediction = json.loads(
+            self.run_cli(
+                "predict", "--db", self.db, "--race-id", card["race"]["race_id"],
+                "--model-version", "cal-base-cal",
+            ).stdout
+        )
+        self.assertEqual(prediction["calibration"]["method"], "isotonic")
+        self.assertEqual(prediction["calibration"]["evaluation_samples"], 15)
+        self.assertTrue(any("post-train-out-of-sample" in warning for warning in prediction["warnings"]))
+        self.assertAlmostEqual(
+            sum(item["win_probability"] for item in prediction["runners"]), 1.0, places=9
+        )
+
+    def test_calibrate_never_falls_back_to_training_window(self):
+        self.run_cli("init", "--db", self.db)
+        self.build_history(1, 10)
+        self.run_cli(
+            "fit", "--db", self.db, "--model-version", "cal-no-post",
+            "--features", "market_logp,rating", "--train-before", "2026-08-11",
+            "--min-races", 8, "--epochs", 10,
+        )
+        failed = self.run_cli(
+            "calibrate", "--db", self.db, "--model-version", "cal-no-post",
+            "--new-version", "cal-no-post-cal", "--min-train-races", 6,
+            "--min-samples", 1, ok=False,
+        )
+        self.assertIn("found 0", failed.stderr)
+        self.assertIn("add at least 2 more post-training races", failed.stderr)
+        with closing(sqlite3.connect(self.db)) as connection:
+            count = connection.execute(
+                "SELECT COUNT(*) FROM models WHERE model_version = 'cal-no-post-cal'"
+            ).fetchone()[0]
+        self.assertEqual(count, 0)
+
+    def test_calibrate_reports_post_training_race_and_sample_deficit(self):
+        self.run_cli("init", "--db", self.db)
+        self.build_history(1, 12)
+        self.run_cli(
+            "fit", "--db", self.db, "--model-version", "cal-short-post",
+            "--features", "market_logp,rating", "--train-before", "2026-08-11",
+            "--min-races", 8, "--epochs", 10,
+        )
+        failed = self.run_cli(
+            "calibrate", "--db", self.db, "--model-version", "cal-short-post",
+            "--new-version", "cal-short-post-cal", "--min-train-races", 6,
+            "--min-samples", 6, ok=False,
+        )
+        self.assertIn("found 5 (1 more needed)", failed.stderr)
+        self.assertIn("1 fit races and 1 evaluation races", failed.stderr)
+        self.assertIn("2 post-training races", failed.stderr)
+        self.assertIn("At least 1 more completed post-training race is needed", failed.stderr)
+        with closing(sqlite3.connect(self.db)) as connection:
+            count = connection.execute(
+                "SELECT COUNT(*) FROM models WHERE model_version = 'cal-short-post-cal'"
+            ).fetchone()[0]
+        self.assertEqual(count, 0)
 
 
 class DomainRuleTests(unittest.TestCase):
@@ -1179,7 +1643,6 @@ class DecisionUnitTests(unittest.TestCase):
     def test_coverage_slices_handles_empty_input(self):
         from decision import coverage_slices
         self.assertEqual(coverage_slices([], [50]), [])
-
 
 if __name__ == "__main__":
     unittest.main()
