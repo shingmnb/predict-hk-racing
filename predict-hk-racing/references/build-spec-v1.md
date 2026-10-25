@@ -151,7 +151,7 @@ def audit_snapshots(db_path: str, race_id: str | None = None) -> dict
 
 ## 6. 開放問題（要另外兩個 agent 決定）
 
-1. **[等 Agent A 賽日實測]** Q/PQ 真實 pool 賠率有無穩定公開來源？Agent A 側 WIN/PLA tick automation 已實證可行（未經 B 獨立重跑）；QIN/QPL pool query 與 closing odds 抓取未實測，唔可以假設可得。Agent A 下次賽日 T-60 實測，結果寫 `references/hkjc-odds-fetching.md`。實測前 `tickets.py` 維持 `ev: None` + `estimated: true`，來源唔標已驗收。
+1. **[Agent A 已實測 2026-10-25，部分完成]** Q/PQ 真實 pool 賠率有穩定公開來源：同一條白名單 GraphQL query 加 `oddsTypes:["QIN","QPL"]` 即得；兩場實證（ST R1 55 nodes=C(11,2)、R5 91 nodes=C(14,2)），賽後 PAYOUT 狀態 closing odds 保留可抓。**未驗**：T-60 live selling window tick 行為，下個賽日補。結果同 query 契約寫入 `references/hkjc-odds-fetching.md`（combString=`NN,MM` 零填充、oddsNodes 賠率升序非字典序、pmPools 順序唔保證必 filter）。`tickets.py` 嘅 `ev: None + estimated: true` gating 前提（「唔可以假設可得」）已被推翻——解除時點等 B 拍板。
 2. **[開放]** 要唔要支援 place／show pool 的 EV（Ziemba：place 池 bias 更極端）？
 3. **[已拍板 2026-10-24]** 第三個 agent = Kimi，負責實現層（全部模組 code+tests，唔加賽馬觀點）。見 §1 三方角色表。
 4. **[已拍板 2026-10-24，Agent A 最終決定]** repo = source of truth；Hermes `skills/` 只放零邏輯 invocation wrapper（只有調用 CLI + 傳出路徑，零業務邏輯）。cron 約束不變：賠率 automation 只喺 skill 生命週期內行（`odds_cron_ctl start/stop`），平時 paused，絕不常駐。
