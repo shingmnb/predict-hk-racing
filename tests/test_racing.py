@@ -1530,6 +1530,42 @@ class PipelineIntegrationTests(unittest.TestCase):
         self.assertEqual(count, 0)
 
 
+    def test_calibrated_backtest_requires_post_calibration_window(self):
+        self.run_cli("init", "--db", self.db)
+        self.build_history(1, 16)
+        self.run_cli(
+            "fit", "--db", self.db, "--model-version", "cb-base",
+            "--features", "market_logp,rating", "--train-before", "2026-08-10",
+            "--min-races", 8, "--epochs", 30,
+        )
+        calibration = json.loads(
+            self.run_cli(
+                "calibrate", "--db", self.db, "--model-version", "cb-base",
+                "--new-version", "cb-cal", "--method", "isotonic",
+                "--min-train-races", 6, "--min-samples", 20,
+            ).stdout
+        )
+        self.assertEqual(calibration["through"], "2026-08-16")
+
+        overlapped = self.run_cli(
+            "backtest", "--db", self.db, "--model-version", "cb-cal",
+            "--min-train-races", 5, "--min-test-races", 2, "--refit-every", 2,
+            "--test-after", "2026-08-14", "--bootstrap", 50, ok=False,
+        )
+        self.assertIn("after 2026-08-16", overlapped.stderr)
+
+        self.build_history(17, 4)
+        report = json.loads(
+            self.run_cli(
+                "backtest", "--db", self.db, "--model-version", "cb-cal",
+                "--min-train-races", 5, "--min-test-races", 2, "--refit-every", 2,
+                "--test-after", "2026-08-17", "--bootstrap", 50,
+            ).stdout
+        )
+        self.assertTrue(report["method"]["calibration_applied"])
+        self.assertEqual(report["method"]["calibration_through"], "2026-08-16")
+
+
 class DomainRuleTests(unittest.TestCase):
     def test_place_slots_follow_hkjc_terms(self):
         self.assertEqual(derive_place_slots(14), 3)

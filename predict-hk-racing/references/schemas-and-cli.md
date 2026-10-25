@@ -178,6 +178,11 @@ python "<SKILL>/scripts/racing_lab.py" calibrate \
 - `predict --model-version <new>` 會自動逐場套用、重新 normalise，輸出 `calibration` 欄位同樣本來源；
 - 窗後場次或 fit 樣本不足會直接報錯並話你知欠幾多，唔會用訓練窗 in-sample 預測偷偷擬合。
 
+> **校準版只可以在校準資料之後的場次評估。** `backtest`／`value-backtest` 會讀
+> `calibration.through`；如果測試窗第一場 ≤ through，會直接報錯並建議 `--test-after`。
+> 報告會寫 `calibration_applied` 同 `calibration_through`。因為校準用「現在為止所有
+> post-training 場次」，校準完要等新賽事入庫才有合法回測窗口；長遠應做「逐窗前移校準」。
+
 ## 價值與選擇性使用
 
 ```bash
