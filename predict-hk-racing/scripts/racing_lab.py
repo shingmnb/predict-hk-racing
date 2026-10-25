@@ -761,6 +761,8 @@ def promotion_eligible(gate: dict) -> bool:
     )
     if gate.get("champion_comparison_required"):
         eligible = eligible and gate.get("champion_improvement_adjusted_ci_excludes_zero") is True
+    if gate.get("calibration_evidence_required"):
+        eligible = eligible and gate.get("calibration_evidence_valid") is True
     if gate.get("information_gain_required"):
         eligible = (
             eligible
@@ -830,6 +832,7 @@ def command_backtest(args) -> dict:
         champion_comparison = None
         if champion_version and champion_version != args.model_version:
             champion_template = get_model(db, champion_version)
+            calibration_window_guard(champion_template, records, test_indices)
             champion_rows = walk_forward(records, champion_template, test_indices, args.refit_every)
             by_race = {row["race_id"]: row for row in champion_rows}
             aligned = [by_race[row["race_id"]] for row in candidate_rows if row["race_id"] in by_race]
@@ -1093,6 +1096,20 @@ def command_promote(args) -> dict:
         report_rows = [(row, json.loads(row["report_json"])) for row in rows]
         row, report = report_rows[0]
         gate = dict(report["promotion_gate"])
+        calibration = model.get("calibration") or {}
+        calibration_through = calibration.get("through")
+        calibration_evidence_required = bool(calibration)
+        method = report.get("method") or {}
+        gate["calibration_evidence_required"] = calibration_evidence_required
+        gate["calibration_evidence_valid"] = (
+            not calibration_evidence_required
+            or (
+                bool(calibration_through)
+                and report.get("source_model_hash") == payload_hash(model)
+                and method.get("calibration_applied") is True
+                and method.get("calibration_through") == calibration_through
+            )
+        )
         current_candidates = db.execute(
             "SELECT COUNT(DISTINCT model_version) FROM evaluation_runs WHERE kind = 'backtest'"
         ).fetchone()[0]

@@ -34,8 +34,9 @@
 
 ### Fixed (calibrated evaluation)
 
-- `backtest`／`value-backtest` 對校準版本逐窗套用儲存的校準層，報告新增 `calibration_applied`／`calibration_through`。
+- `backtest`／`value-backtest` 對校準版本逐窗套用儲存的校準層，報告新增 `calibration_applied`／`calibration_through`；champion 比較亦受校準窗防線約束。
 - `calibrate` 記錄 `through`（校準用到的日期上限）；測試窗與校準資料重疊時直接報錯並建議 `--test-after`，避免用未來校準器評分過去場次。
+- `promote` 拒絕修復前或 `calibration_through` 錯配的校準版回測證據，避免用未校準表現批准校準模型。
 
 ## [0.2.0] - 2026-10-24
 
