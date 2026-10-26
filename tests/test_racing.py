@@ -1903,5 +1903,36 @@ class ReconstructionCardTests(unittest.TestCase):
             validate_card(self._card(late_value="yes"))
 
 
+class CalibrationDriftUnitTests(unittest.TestCase):
+    def test_period_buckets(self):
+        from drift import period_of
+
+        self.assertEqual(period_of("2026-06-24"), "2026-06")
+        self.assertEqual(period_of("2026-06-24", mode="meeting"), "2026-06-24")
+
+    def test_drift_flags_only_reliable_periods(self):
+        from drift import summarize_periods
+
+        good = [(0.2, 0), (0.8, 1)] * 60
+        bad = [(0.9, 0), (0.1, 1)] * 60
+        tiny = [(0.5, 0)]
+        report = summarize_periods(
+            {"2026-06": good, "2026-07": bad, "2026-08": tiny},
+            baseline_ece=0.0, min_samples=100, threshold=0.02,
+        )
+        self.assertTrue(report["drift_detected"])
+        self.assertIn("2026-07", report["drifted_periods"])
+        self.assertNotIn("2026-08", report["drifted_periods"])
+        self.assertFalse(next(p for p in report["periods"] if p["period"] == "2026-08")["drift"])
+
+    def test_missing_baseline_never_flags(self):
+        from drift import summarize_periods
+
+        report = summarize_periods({"2026-06": [(0.9, 0), (0.1, 1)] * 60},
+                                   baseline_ece=None, min_samples=100, threshold=0.02)
+        self.assertFalse(report["drift_detected"])
+        self.assertIsNone(report["periods"][0]["delta_vs_baseline"])
+
+
 if __name__ == "__main__":
     unittest.main()

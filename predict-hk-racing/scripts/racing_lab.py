@@ -25,6 +25,7 @@ from domain import (  # noqa: E402
     registered as feature_registered,
     describe as describe_features,
 )
+from drift import period_of, summarize_periods  # noqa: E402
 from decision import coverage_slices, settle_stream  # noqa: E402
 from racing_model import (  # noqa: E402
     apply_calibration,
@@ -1457,6 +1458,69 @@ def command_calibrate(args) -> dict:
     return model["calibration"] | {"model_version": args.new_version}
 
 
+def command_calibration_drift(args) -> dict:
+    with connect(args.db) as db:
+        kinds = {item.strip() for item in args.kinds.split(",") if item.strip()}
+        rows = db.execute(
+            "SELECT * FROM prediction_runs ORDER BY created_at, rowid"
+        ).fetchall()
+        selected: dict[tuple[str, str], object] = {}
+        for row in rows:
+            if kinds and row["forecast_kind"] not in kinds:
+                continue
+            if args.model_version != "all" and row["model_version"] != args.model_version:
+                continue
+            selected[(row["model_version"], row["race_id"])] = row
+
+        grouped: dict[str, dict[str, list[tuple[float, int]]]] = {}
+        for (version, race_id), row in selected.items():
+            result = latest_result(db, race_id)
+            if not result:
+                continue
+            card, _ = latest_card(db, race_id, row["snapshot_id"])
+            prediction = json.loads(row["payload_json"])
+            period = period_of(card["race"]["meeting_date"], mode=args.period)
+            points = prediction_calibration_points({"card": card, "result": result}, prediction)
+            grouped.setdefault(version, {}).setdefault(period, []).extend(points)
+
+        models = {}
+        for version, by_period in grouped.items():
+            model = None
+            if version not in {"market-baseline", "baseline"}:
+                try:
+                    model = get_model(db, version)
+                except ValueError:
+                    model = None
+            calibration = (model or {}).get("calibration") or {}
+            baseline = calibration.get("ece_after")
+            summary = summarize_periods(
+                by_period,
+                baseline_ece=baseline,
+                min_samples=args.min_samples,
+                threshold=args.threshold,
+            )
+            summary["baseline_source"] = (
+                "calibration.ece_after" if baseline is not None else "none"
+            )
+            models[version] = summary
+
+        report = {
+            "kind": "calibration-drift-v1",
+            "created_at": now_iso(),
+            "period": args.period,
+            "kinds": sorted(kinds) if kinds else "all",
+            "models": models,
+            "drift_detected": any(item["drift_detected"] for item in models.values()),
+        }
+        evaluation_id = "ev_" + uuid.uuid4().hex
+        db.execute(
+            "INSERT INTO evaluation_runs VALUES (?, ?, ?, ?, ?)",
+            (evaluation_id, "calibration-drift", args.model_version, report["created_at"], canonical(report)),
+        )
+        report["evaluation_id"] = evaluation_id
+    return report
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -1585,6 +1649,17 @@ def build_parser() -> argparse.ArgumentParser:
     calibrate.add_argument("--min-samples", type=int, default=200)
     calibrate.add_argument("--output")
 
+    drift = sub.add_parser(
+        "calibration-drift", help="Per-period ECE against the calibration baseline"
+    )
+    drift.add_argument("--db", required=True)
+    drift.add_argument("--model-version", default="all")
+    drift.add_argument("--period", choices=["month", "meeting"], default="month")
+    drift.add_argument("--kinds", default="pre-race")
+    drift.add_argument("--min-samples", type=int, default=100)
+    drift.add_argument("--threshold", type=float, default=0.02)
+    drift.add_argument("--output")
+
     promote = sub.add_parser("promote", help="Promote only an eligible model; otherwise record rejection")
     promote.add_argument("--db", required=True)
     promote.add_argument("--model-version", required=True)
@@ -1618,6 +1693,7 @@ def main() -> int:
             "backtest": command_backtest,
             "value-backtest": command_value_backtest,
             "calibrate": command_calibrate,
+            "calibration-drift": command_calibration_drift,
             "promote": command_promote,
         }
         result = handlers[args.command](args)
