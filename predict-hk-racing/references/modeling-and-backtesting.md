@@ -69,6 +69,8 @@ ece = expected_calibration_error(list(zip(later_holdout_probs, later_holdout_lab
 
 **校準器本身也要被驗收。** `calibrate` 會比較 holdout 的 `ece_before` / `ece_after`，變差就拒絕（`--allow-worse-calibration` 可覆寫）；`--method auto` 在少於 500 個 fit points 時改用 Platt，因為 isotonic 在小樣本會過擬合；輸出 clamp 到 `[0.001, 0.99]` 再 normalise。
 
+**校準器會老化。** 一次性擬合的校准曲線會隨市場與馬房變化而失效。`calibration-drift` 會按月（或逐賽日）計 live 預測的 ECE，同 `calibration.ece_after` 比較；超過門檻就標 drift，提示重新校準。樣本不足的期間只作參考，不會觸發警報。
+
 ## Early stopping（`fit_model`）
 
 ```python

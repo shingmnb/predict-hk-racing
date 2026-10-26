@@ -219,6 +219,19 @@ python "<SKILL>/scripts/racing_lab.py" value-backtest \
   程式會接受並在 warnings 標明「事後重建」，但呢類卡永遠唔可以當賽前快照。
   `live` 卡加呢個旗標會被拒絕。
 
+## 校準漂移監控
+
+```bash
+python "<SKILL>/scripts/racing_lab.py" calibration-drift \
+  --db "racing-data/racing.db" --model-version all --period month --min-samples 100
+```
+
+- 按 `meeting_date` 分月（或 `--period meeting` 逐賽日）計 ECE；
+- 基準係模型的 `calibration.ece_after`（冇就用 `none`，只報 ECE）；
+- `samples < --min-samples` 的期間只作參考，不會標記 drift；
+- `delta > --threshold`（預設 0.02）就標 `drift: true`，並列出 `drifted_periods`；
+- 報告存入 `evaluation_runs`（kind `calibration-drift`）。
+
 ## 位置名額與特徵註冊
 
 `place_slots` 可以省略：程式會用 `declared_starters`（冇填就用 active runners）按本地賽規則推導——7 匹或以上 3 位、4-6 匹 2 位。少於 4 匹時嘅 1 位只係模型近似，唔代表有正式 Place pool。若果你寫死一個同 field size 唔相符嘅值，`import-card` 會出 warning 並照用你嘅值（例如有馬退出但 declared starters 未變）。

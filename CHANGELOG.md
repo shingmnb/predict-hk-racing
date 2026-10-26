@@ -50,6 +50,11 @@
 
 - Schema 1.1 卡可以加 `retrieval_after_cutoff: true`（只限 `collection_mode: historical`），明確標示來源喺 data_cutoff 之後取得；會出「事後重建」warning，`live` 卡用會被拒。
 
+### Added (calibration drift)
+
+- `calibration-drift` 命令：按月／逐賽日計 live ECE，對比 `calibration.ece_after`，超過門檻標示 drift；樣本不足期間只作參考。
+- `scripts/drift.py`：period 分桶與 drift 判定（可直接單元測試）。
+
 ## [0.2.0] - 2026-10-24
 
 ### Added
