@@ -11,7 +11,7 @@
 | 排位表 <https://racing.hkjc.com/zh-hk/local/information/racecard> | 全場、檔位、負磅、評分、配備、退出 | 排位日（T-1） | `gear_change`、`scratching` |
 | 晨操資料 <https://racing.hkjc.com/zh-hk/local/information/localtrackwork> | 操練時間、段落、馬房 | 每日 | `trackwork` |
 | 試閘結果 <https://racing.hkjc.com/racing/information/english/Horse/Btresult.aspx> | 名次、距離、騎師、評語 | 每次試閘後 | `trial_performance` |
-| 傷患／健康紀錄 <https://racing.hkjc.com/en-us/local/page/racing-course-time> | 獸醫紀錄、傷患、健康狀況 | 持續 | `vet` |
+| 傷患／健康紀錄 <https://racing.hkjc.com/en-us/local/information/ovedatabase> | 獸醫紀錄、傷患、健康狀況 | 持續 | `vet` |
 | 賽馬新聞 <https://racingnews.hkjc.com/chinese/> | 獸醫報告增補、賽事報告、馬房消息 | 每日 | `vet`、`steward_report` |
 | 貼士指數 <https://racing.hkjc.com/racing/chinese/tipsindex/tips_index.asp> | 傳媒貼士彙總 | 賽日 | `consensus`（市場情緒，非意圖） |
 | 賽果與分段 <https://racing.hkjc.com/zh-hk/local/information/localresults> | 名次、走位、段速、派彩 | 賽後 | `trip`、`result` |
@@ -91,9 +91,9 @@ Telegram／X 貼士頻道、YouTube 馬評、討論區。**永遠唔可以直接
 
 ```bash
 fit ... --model-version market-only --features market_logp
-fit ... --model-version intel-only  --features intel_centered,rating
+fit ... --model-version intel-only  --features intent_centered,rating
 fit ... --model-version combined \
-  --features market_logp,intel_centered,rating --block intel=intel_centered
+  --features market_logp,intent_centered,rating --block intel=intent_centered
 backtest --model-version combined --ablate intel
 ```
 
