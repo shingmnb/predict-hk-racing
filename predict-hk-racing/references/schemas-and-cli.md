@@ -214,6 +214,11 @@ python "<SKILL>/scripts/racing_lab.py" value-backtest \
 - `max_single_stake_fraction`：單注最大佔當時 bankroll 比例；
 - `profit_concentration`：最佳一場佔總利潤比例（越接近 1 表示盈利越集中、越不可靠）。
 
+- **事後重建**：如果卡片係由官方賽果頁事後重建（來源一定喺 `data_cutoff` 之後才取得），
+  可以喺 card 加 `retrieval_after_cutoff: true`，並保持 `collection_mode: historical`；
+  程式會接受並在 warnings 標明「事後重建」，但呢類卡永遠唔可以當賽前快照。
+  `live` 卡加呢個旗標會被拒絕。
+
 ## 位置名額與特徵註冊
 
 `place_slots` 可以省略：程式會用 `declared_starters`（冇填就用 active runners）按本地賽規則推導——7 匹或以上 3 位、4-6 匹 2 位。少於 4 匹時嘅 1 位只係模型近似，唔代表有正式 Place pool。若果你寫死一個同 field size 唔相符嘅值，`import-card` 會出 warning 並照用你嘅值（例如有馬退出但 declared starters 未變）。

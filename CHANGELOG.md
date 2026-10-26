@@ -46,6 +46,10 @@
 - `value-backtest` 報告 `roi_ci95`、`max_single_stake_fraction`、`profit_concentration`。
 - `tools/package_skill.py` 加 UTF-8 stdio 護欄（zh-HK Windows 中文路徑唔會再 encode error）。
 
+### Added (post-hoc reconstruction channel)
+
+- Schema 1.1 卡可以加 `retrieval_after_cutoff: true`（只限 `collection_mode: historical`），明確標示來源喺 data_cutoff 之後取得；會出「事後重建」warning，`live` 卡用會被拒。
+
 ## [0.2.0] - 2026-10-24
 
 ### Added

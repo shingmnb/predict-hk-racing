@@ -195,6 +195,11 @@ def validate_card(card: dict, *, allow_unknown_features: bool = False) -> list[s
         raise ValueError("collection_mode must be live or historical")
     if mode == "live" and captured > off_time:
         raise ValueError("A live card cannot be captured after off_time")
+    late_sources = card.get("retrieval_after_cutoff", False)
+    if not isinstance(late_sources, bool):
+        raise ValueError("retrieval_after_cutoff must be a boolean")
+    if late_sources and mode != "historical":
+        raise ValueError("retrieval_after_cutoff is only allowed for collection_mode: historical")
     if not isinstance(race.get("race_no"), int) or race["race_no"] < 1:
         raise ValueError("race.race_no must be a positive integer")
     if not isinstance(race.get("distance_m"), int) or race["distance_m"] <= 0:
@@ -223,8 +228,11 @@ def validate_card(card: dict, *, allow_unknown_features: bool = False) -> list[s
             raise ValueError(f"Source {source_id} excerpt must be a string")
         if source.get("retrieved_at"):
             retrieved = parse_ts(source["retrieved_at"], f"source {source_id} retrieved_at")
-            if strict_evidence and retrieved > cutoff:
-                raise ValueError(f"Source {source_id} was retrieved after data_cutoff")
+            if strict_evidence and retrieved > cutoff and not late_sources:
+                raise ValueError(
+                    f"Source {source_id} was retrieved after data_cutoff; for a post-hoc "
+                    "reconstruction set retrieval_after_cutoff: true with collection_mode: historical"
+                )
 
     runners = card.get("runners")
     if not isinstance(runners, list) or len(runners) < 2:
@@ -311,6 +319,11 @@ def validate_card(card: dict, *, allow_unknown_features: bool = False) -> list[s
         warnings.append("歷史重建資料：只可當回測輸入，唔可以冒充當日實時賽前預測。")
     if not strict_evidence:
         warnings.append("schema 1.0 卡：意圖證據未有逐字 quote，建議改用 schema 1.1。")
+    if late_sources:
+        warnings.append(
+            "事後重建：部分來源喺 data_cutoff 之後取得（retrieval_after_cutoff=true），"
+            "只可作回測輸入，唔可以當賽前快照。"
+        )
     return warnings
 
 
