@@ -1712,6 +1712,31 @@ class ValueDiagnosticsUnitTests(unittest.TestCase):
         self.assertIsNotNone(low)
         self.assertLessEqual(low, high)
 
+    def test_max_single_stake_uses_bet_not_race_total(self):
+        from decision import settle_stream
+
+        record = {"result": {"results": [
+            {"horse_no": 1, "finish_position": 1, "win_dividend": 60.0},
+            {"horse_no": 2, "finish_position": 2, "win_dividend": None},
+            {"horse_no": 3, "finish_position": 3, "win_dividend": None},
+        ]}}
+        prediction = {
+            "race_id": "multi-bet-race",
+            "runners": [
+                {"horse_no": 1, "win_probability": 0.2, "win_odds_snapshot": 6.0},
+                {"horse_no": 2, "win_probability": 0.2, "win_odds_snapshot": 8.0},
+                {"horse_no": 3, "win_probability": 0.2, "win_odds_snapshot": 10.0},
+            ],
+        }
+        result = settle_stream(
+            [(record, prediction)], stake_mode="kelly", cap=0.2,
+            bankroll=1000.0, min_edge=0.01, kelly_multiplier=1.0,
+            max_race_fraction=0.4, unit=1.0,
+        )
+        self.assertEqual(result["bets"], 3)
+        self.assertAlmostEqual(result["turnover"], 236.0, places=4)
+        self.assertAlmostEqual(result["max_single_stake_fraction"], 0.111, places=6)
+
 
 class DomainRuleTests(unittest.TestCase):
     def test_place_slots_follow_hkjc_terms(self):

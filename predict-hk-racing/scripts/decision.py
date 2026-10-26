@@ -200,7 +200,8 @@ def settle_stream(
         bank_before = bank
         if bank_before > 0:
             max_single_stake_fraction = max(
-                max_single_stake_fraction, race_stake / bank_before
+                max_single_stake_fraction,
+                max(item["stake"] for item in race_bets) / bank_before,
             )
         race_results.append((race_stake, race_returned - race_stake))
         bank += race_returned - race_stake
