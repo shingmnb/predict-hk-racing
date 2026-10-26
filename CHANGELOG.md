@@ -55,6 +55,10 @@
 - `calibration-drift` 命令：按月／逐賽日計 live ECE，對比 `calibration.ece_after`，超過門檻標示 drift；樣本不足期間只作參考。
 - `scripts/drift.py`：period 分桶與 drift 判定（可直接單元測試）。
 
+### Added (intel sources)
+
+- `references/intel-sources.md`：A/B/C 級消息來源、來源→claim 對應表、賽日 SOP、高價值信號、以及用 intel-only / `--ablate intel` 驗證情報價值的方法。
+
 ## [0.2.0] - 2026-10-24
 
 ### Added
