@@ -63,6 +63,11 @@
 
 - `references/real-data-validation.md`：861 場官方賽果的外部驗證——建語料、無洩漏特徵、260 場回測（同市場打平，CI ±0.01）、係數隨語料縮向 0、校準與值博數據、CLV 協議與其限制。
 
+### Added (Obsidian bridge)
+
+- `tools/obsidian_sync.py`：`export`（DB → Obsidian notes）、`import`（canonical notes → card/result JSON）、`migrate`（舊 Hermes picks notes → partial JSON + 報告）。
+- `references/obsidian-history.md`：格式與工作流；舊 notes 冇全場／賠率時會標 `partial` 並列明缺失。
+
 ## [0.2.0] - 2026-10-24
 
 ### Added
@@ -86,3 +91,4 @@
 
 [0.2.0]: https://github.com/shingmnb/predict-hk-racing/releases/tag/v0.2.0
 [0.1.0]: https://github.com/shingmnb/predict-hk-racing/releases/tag/v0.1.0
+

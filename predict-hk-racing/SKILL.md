@@ -25,6 +25,7 @@ description: >-
 - 評估「去馬／保留／備戰」前，讀 [intent-model.md](references/intent-model.md)。
 - 建概率、訓練、回測或修正模型前，讀 [modeling-and-backtesting.md](references/modeling-and-backtesting.md)。
 - 建立 JSON、執行腳本或解讀資料庫前，讀 [schemas-and-cli.md](references/schemas-and-cli.md)。
+- 想用 Obsidian 管理歷史數據、或由舊 notes 遷移，讀 [obsidian-history.md](references/obsidian-history.md)。
 - 用 `assets/race-card-template.json`、`assets/race-result-template.json` 複製輸入模板；唔好直接改模板當用戶紀錄。
 
 將本目錄記為 `<SKILL>`；將用戶數據放當前工作區 `racing-data/`，唔好寫入 Skill 安裝目錄。
