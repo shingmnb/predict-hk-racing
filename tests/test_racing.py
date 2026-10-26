@@ -1852,5 +1852,56 @@ class DecisionUnitTests(unittest.TestCase):
         from decision import coverage_slices
         self.assertEqual(coverage_slices([], [50]), [])
 
+class ReconstructionCardTests(unittest.TestCase):
+    def _card(self, *, mode="historical", late=True, late_value=True, retrieved="2026-10-26T10:00:00+08:00"):
+        card = {
+            "schema_version": "1.1",
+            "collection_mode": mode,
+            "captured_at": "2026-10-26T11:00:00+08:00",
+            "data_cutoff": "2026-06-24T09:00:00+08:00",
+            "race": {
+                "race_id": "2026-06-24-HV-R1", "meeting_date": "2026-06-24", "venue": "HV",
+                "race_no": 1, "off_time": "2026-06-24T19:15:00+08:00", "distance_m": 1200,
+                "place_slots": 3, "declared_starters": 8,
+            },
+            "sources": [{
+                "source_id": "S1", "title": "HKJC results", "url": "https://example.invalid/r",
+                "retrieved_at": retrieved,
+            }],
+            "runners": [
+                {"horse_no": 1, "horse_name": "A", "features": {}},
+                {"horse_no": 2, "horse_name": "B", "features": {}},
+            ],
+        }
+        if late:
+            card["retrieval_after_cutoff"] = late_value
+        return card
+
+    def test_historical_card_may_use_late_sources_when_flagged(self):
+        from racing_lab import validate_card
+
+        warnings = validate_card(self._card())
+        self.assertTrue(any("事後重建" in warning for warning in warnings))
+
+    def test_flag_is_rejected_without_it(self):
+        from racing_lab import validate_card
+
+        with self.assertRaises(ValueError) as raised:
+            validate_card(self._card(late=False))
+        self.assertIn("retrieval_after_cutoff", str(raised.exception))
+
+    def test_live_card_cannot_use_the_flag(self):
+        from racing_lab import validate_card
+
+        with self.assertRaises(ValueError):
+            validate_card(self._card(mode="live"))
+
+    def test_flag_must_be_boolean(self):
+        from racing_lab import validate_card
+
+        with self.assertRaises(ValueError):
+            validate_card(self._card(late_value="yes"))
+
+
 if __name__ == "__main__":
     unittest.main()
