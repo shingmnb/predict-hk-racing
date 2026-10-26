@@ -58,6 +58,15 @@ collection_mode: historical
 
 **重點**：partial card 只可以做「記錄」同「未來補完」，**唔可以**當真實賽前預測用；`predict` 對呢類卡會用均勻市場基準並出 warning。
 
+## 模板
+
+ssets/obsidian-race-note.md 係可直接放進 vault Templates/ 的模板：frontmatter 八個欄位、Runners 表、Result 表。用 Obsidian 的「Insert template」即可開新賽事筆記。
+
+實測過的兩種來源：
+
+- **HKJC 官方賽果**：	ools/obsidian_sync.py 之外，用 hkjc_import 抓 archive/localresults，可補回全場、檔位、負磅、獨贏賠率、名次同派彩（2026-06-24 HV 9 場全部通過驗證）。
+- **自由格式舊筆記**：Goodwood FINAL LOCK 那類散文式筆記，先轉成 canonical notes（見 Race Predictions/2026-07-31 Goodwood S4/canonical/），再用 import 生成 card JSON。
+
 ## 建議工作流
 
 1. 賽前：用 skill 正常流程寫 card → `import-card` → `predict`
