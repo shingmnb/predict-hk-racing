@@ -10,6 +10,11 @@ from datetime import datetime, timezone
 from statistics import mean, median, pstdev
 
 EPS = 1e-12
+
+# A calibrator fitted on a few hundred points can map probabilities to 0 or 1.
+# Clamping keeps a single bad point from erasing the field (log loss explosions).
+CALIBRATION_MIN = 0.001
+CALIBRATION_MAX = 0.99
 DIRECTIONS = {
     "positive": 1.0,
     "negative": -1.0,
@@ -618,11 +623,12 @@ def apply_calibration(model: dict | None, probabilities: list[float]) -> list[fl
     method = calibration.get("method")
     fitted = calibration.get("model")
     if method == "isotonic":
-        adjusted = [max(EPS, isotonic_apply(fitted, value)) for value in probabilities]
+        adjusted = [isotonic_apply(fitted, value) for value in probabilities]
     elif method == "platt":
-        adjusted = [max(EPS, platt_apply(fitted, value)) for value in probabilities]
+        adjusted = [platt_apply(fitted, value) for value in probabilities]
     else:
         raise ValueError(f"Unsupported calibration method: {method}")
+    adjusted = [min(CALIBRATION_MAX, max(CALIBRATION_MIN, value)) for value in adjusted]
     total = sum(adjusted)
     if total <= EPS:
         return probabilities

@@ -1410,7 +1410,7 @@ class PipelineIntegrationTests(unittest.TestCase):
             self.run_cli(
                 "calibrate", "--db", self.db, "--model-version", "cal-base",
                 "--new-version", "cal-base-cal", "--method", "isotonic",
-                "--min-train-races", 6, "--min-samples", 20,
+                "--min-train-races", 6, "--min-samples", 20, "--allow-worse-calibration",
             ).stdout
         )
         self.assertEqual(calibration["method"], "isotonic")
@@ -1551,7 +1551,7 @@ class PipelineIntegrationTests(unittest.TestCase):
             self.run_cli(
                 "calibrate", "--db", self.db, "--model-version", "cb-base",
                 "--new-version", "cb-cal", "--method", "isotonic",
-                "--min-train-races", 6, "--min-samples", 20,
+                "--min-train-races", 6, "--min-samples", 20, "--allow-worse-calibration",
             ).stdout
         )
         self.assertEqual(calibration["through"], "2026-08-16")
@@ -1644,6 +1644,73 @@ class PipelineIntegrationTests(unittest.TestCase):
         current = promote()
         self.assertEqual(current["event"], "promoted")
         self.assertTrue(current["promotion_gate"]["calibration_evidence_valid"])
+
+
+class CalibrationGuardUnitTests(unittest.TestCase):
+    def test_auto_method_prefers_platt_on_small_samples(self):
+        from racing_lab import resolve_calibration_method
+
+        method, policy = resolve_calibration_method("auto", 144)
+        self.assertEqual(method, "platt")
+        self.assertIn("auto", policy)
+        self.assertEqual(resolve_calibration_method("auto", 900)[0], "isotonic")
+        self.assertEqual(resolve_calibration_method("platt", 900)[0], "platt")
+
+    def test_ece_guard_rejects_worse_and_allows_override(self):
+        from racing_lab import calibration_ece_guard
+
+        calibration_ece_guard(0.02, 0.01, allow_worse=False)
+        with self.assertRaises(ValueError):
+            calibration_ece_guard(0.02, 0.03, allow_worse=False)
+        calibration_ece_guard(0.02, 0.03, allow_worse=True)
+
+    def test_apply_calibration_clamps_extremes(self):
+        from racing_model import CALIBRATION_MAX, apply_calibration
+
+        model = {"calibration": {"method": "isotonic", "model": {"x": [0.0, 1.0], "y": [0.0, 0.0]}}}
+        adjusted = apply_calibration(model, [0.1, 0.4, 0.9])
+        self.assertAlmostEqual(sum(adjusted), 1.0, places=9)
+        self.assertTrue(all(0 < value < CALIBRATION_MAX for value in adjusted))
+
+
+class ValueDiagnosticsUnitTests(unittest.TestCase):
+    @staticmethod
+    def _stream(races):
+        for race_id, winner in races:
+            record = {
+                "result": {"results": [
+                    {"horse_no": 1, "finish_position": 1 if winner == 1 else 2,
+                     "win_dividend": 30.0 if winner == 1 else None},
+                    {"horse_no": 2, "finish_position": 1 if winner == 2 else 2,
+                     "win_dividend": 30.0 if winner == 2 else None},
+                ]}
+            }
+            prediction = {
+                "race_id": race_id,
+                "runners": [
+                    {"horse_no": 1, "win_probability": 0.6, "win_odds_snapshot": 3.0},
+                    {"horse_no": 2, "win_probability": 0.4, "win_odds_snapshot": 2.5},
+                ],
+            }
+            yield record, prediction
+
+    def test_settlement_reports_risk_and_concentration(self):
+        from decision import settle_stream
+
+        races = [(f"r{i}", 1 if i % 3 != 0 else 2) for i in range(12)]
+        result = settle_stream(
+            self._stream(races), stake_mode="flat", cap=0.05, bankroll=1000.0, min_edge=-1.0
+        )
+        self.assertEqual(result["bets"], 12)
+        self.assertAlmostEqual(
+            result["bankroll_end"], result["bankroll_start"] + result["profit"], places=4
+        )
+        self.assertAlmostEqual(result["max_single_stake_fraction"], 0.05, places=6)
+        self.assertIsNotNone(result["profit_concentration"])
+        self.assertLessEqual(result["profit_concentration"], 1.0)
+        low, high = result["roi_ci95"]
+        self.assertIsNotNone(low)
+        self.assertLessEqual(low, high)
 
 
 class DomainRuleTests(unittest.TestCase):

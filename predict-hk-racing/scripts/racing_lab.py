@@ -41,6 +41,7 @@ from racing_model import (  # noqa: E402
 
 VERSION_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 FAMILYWISE_ALPHA = 0.05
+CALIBRATION_ISOTONIC_MIN_SAMPLES = 500
 IMMUTABLE_TABLES = [
     "card_snapshots",
     "result_snapshots",
@@ -1271,6 +1272,25 @@ def command_value_backtest(args) -> dict:
     return report
 
 
+def resolve_calibration_method(requested: str, samples: int) -> tuple[str, str]:
+    """Resolve ``auto`` to Platt on small samples; isotonic needs enough points."""
+    if requested in {"isotonic", "platt"}:
+        return requested, "explicit"
+    method = "isotonic" if samples >= CALIBRATION_ISOTONIC_MIN_SAMPLES else "platt"
+    return method, f"auto(samples={samples}, threshold={CALIBRATION_ISOTONIC_MIN_SAMPLES})"
+
+
+def calibration_ece_guard(before: float, after: float, *, allow_worse: bool) -> None:
+    """Refuse to store a calibrator that makes the holdout worse than raw scores."""
+    if allow_worse:
+        return
+    if after > before + 1e-12:
+        raise ValueError(
+            f"Calibration made holdout ECE worse ({before:.4f} -> {after:.4f}). "
+            "Store it anyway with --allow-worse-calibration, or use --method platt / more samples."
+        )
+
+
 def prediction_calibration_points(record: dict, prediction: dict) -> list[tuple[float, int]]:
     """Flatten one race's probabilities without losing race-grouped normalisation."""
     winners = {
@@ -1341,7 +1361,8 @@ def command_calibrate(args) -> dict:
 
         scores = [point[0] for point in fit_points]
         labels = [point[1] for point in fit_points]
-        fitted = isotonic_fit(scores, labels) if args.method == "isotonic" else platt_fit(scores, labels)
+        method, method_policy = resolve_calibration_method(args.method, len(fit_points))
+        fitted = isotonic_fit(scores, labels) if method == "isotonic" else platt_fit(scores, labels)
         calibration_through = max(
             record["card"]["race"]["meeting_date"] for record, _ in post_predictions
         )
@@ -1356,7 +1377,8 @@ def command_calibrate(args) -> dict:
                 "created_at": now_iso(),
                 "calibrated_from": args.model_version,
                 "calibration": {
-                    "method": args.method,
+                    "method": method,
+                    "method_policy": method_policy,
                     "model": fitted,
                     "samples": len(fit_points),
                     "evaluation_samples": 0,
@@ -1393,8 +1415,13 @@ def command_calibrate(args) -> dict:
             )
         model["calibration"]["evaluation_samples"] = len(before_points)
         model["calibration"]["post_train_samples"] = len(fit_points) + len(before_points)
-        model["calibration"]["ece_before"] = expected_calibration_error(before_points)
-        model["calibration"]["ece_after"] = expected_calibration_error(after_points)
+        ece_before = expected_calibration_error(before_points)
+        ece_after = expected_calibration_error(after_points)
+        calibration_ece_guard(ece_before, ece_after, allow_worse=args.allow_worse_calibration)
+        model["calibration"]["ece_before"] = ece_before
+        model["calibration"]["ece_after"] = ece_after
+        model["calibration"]["ece_delta"] = round(ece_after - ece_before, 6)
+        model["calibration"]["accepted"] = True
         db.execute(
             "INSERT INTO models VALUES (?, ?, ?, ?)",
             (args.new_version, model["created_at"], model["algorithm"], canonical(model)),
@@ -1406,7 +1433,7 @@ def command_calibrate(args) -> dict:
                 event_id, args.new_version, "calibrated", now_iso(),
                 canonical({
                     "calibrated_from": args.model_version,
-                    "method": args.method,
+                    "method": method,
                     "samples": len(fit_points),
                     "evaluation_samples": len(before_points),
                     "fit_race_ids": fit_race_ids,
@@ -1533,7 +1560,14 @@ def build_parser() -> argparse.ArgumentParser:
     calibrate.add_argument("--db", required=True)
     calibrate.add_argument("--model-version", required=True)
     calibrate.add_argument("--new-version", required=True)
-    calibrate.add_argument("--method", choices=["isotonic", "platt"], default="isotonic")
+    calibrate.add_argument(
+        "--method", choices=["auto", "isotonic", "platt"], default="auto",
+        help="auto uses isotonic only with at least 500 fit points, else Platt",
+    )
+    calibrate.add_argument(
+        "--allow-worse-calibration", action="store_true",
+        help="Store the calibrator even when it makes holdout ECE worse",
+    )
     calibrate.add_argument("--min-train-races", type=int, default=50)
     calibrate.add_argument("--min-samples", type=int, default=200)
     calibrate.add_argument("--output")

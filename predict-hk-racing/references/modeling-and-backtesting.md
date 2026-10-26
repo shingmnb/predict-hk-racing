@@ -67,6 +67,8 @@ ece = expected_calibration_error(list(zip(later_holdout_probs, later_holdout_lab
 - `platt`：兩個參數、小樣本穩定，但只能修正單調壓縮，修正不了非單調偏差。
 - `ece`：10 等寬 bin 的加權 |confidence − accuracy|；< 0.05 可接受。
 
+**校準器本身也要被驗收。** `calibrate` 會比較 holdout 的 `ece_before` / `ece_after`，變差就拒絕（`--allow-worse-calibration` 可覆寫）；`--method auto` 在少於 500 個 fit points 時改用 Platt，因為 isotonic 在小樣本會過擬合；輸出 clamp 到 `[0.001, 0.99]` 再 normalise。
+
 ## Early stopping（`fit_model`）
 
 ```python

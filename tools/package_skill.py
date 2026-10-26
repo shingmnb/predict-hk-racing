@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import sys
 import json
 import re
 import zipfile
@@ -86,7 +87,15 @@ def package(files: list[Path], output: Path) -> tuple[Path, str]:
     return archive, digest
 
 
+def configure_stdio() -> None:
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(encoding="utf-8", errors="replace")
+
+
 def main() -> int:
+    configure_stdio()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, help="Package directory; omit with --check-only")
     parser.add_argument("--check-only", action="store_true")
