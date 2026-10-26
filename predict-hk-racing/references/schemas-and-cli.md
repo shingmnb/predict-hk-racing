@@ -185,6 +185,11 @@ python "<SKILL>/scripts/racing_lab.py" calibrate \
 > 校準證據檢查：舊報告、source model hash 或 through 錯配都會拒絕。因為校準用「現在為止所有
 > post-training 場次」，校準完要等新賽事入庫才有合法回測窗口；長遠應做「逐窗前移校準」。
 
+- `--method auto`（預設）：fit points ≥ 500 用 isotonic，否則用 Platt（小樣本 isotonic 會過擬合）。
+- `--allow-worse-calibration`：預設**拒絕**「holdout ECE 變差」的校準器；加旗標才會照存。
+- 校準輸出 clamp 到 `[0.001, 0.99]` 再 normalise，避免單點極端映射令 log loss 爆炸。
+- 注意：ECE 只檢查 holdout；之後的分布漂移仍然要靠 `backtest` 的 window guard 把關。
+
 ## 價值與選擇性使用
 
 ```bash
@@ -202,6 +207,12 @@ python "<SKILL>/scripts/racing_lab.py" value-backtest \
 - 結算優先用官方 `win_dividend`（香港以每 HK$10 報價，程式除以 10），冇先用快照賠率。
 - 報 turnover、ROI、strike rate、max drawdown、期末 bankroll；Kelly 會放大概率估計誤差，ROI 必須由時間外結算證明，唔好預設正回報。
 - `evaluate --coverage 5,10,20,50` 會按預測信心分層，報每層 log loss／Brier／命中率（selective-use），用嚟答「只買邊啲場」。
+
+`settlement` 另外報三個風險指標：
+
+- `roi_ci95`：按場次 bootstrap（1,000 次）的 ROI 95% 區間；
+- `max_single_stake_fraction`：單注最大佔當時 bankroll 比例；
+- `profit_concentration`：最佳一場佔總利潤比例（越接近 1 表示盈利越集中、越不可靠）。
 
 ## 位置名額與特徵註冊
 
