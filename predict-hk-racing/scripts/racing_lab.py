@@ -25,6 +25,7 @@ from domain import (  # noqa: E402
     registered as feature_registered,
     describe as describe_features,
 )
+from drift import period_of, summarize_periods  # noqa: E402
 from decision import coverage_slices, settle_stream  # noqa: E402
 from racing_model import (  # noqa: E402
     apply_calibration,
@@ -41,6 +42,7 @@ from racing_model import (  # noqa: E402
 
 VERSION_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 FAMILYWISE_ALPHA = 0.05
+CALIBRATION_ISOTONIC_MIN_SAMPLES = 500
 IMMUTABLE_TABLES = [
     "card_snapshots",
     "result_snapshots",
@@ -194,6 +196,11 @@ def validate_card(card: dict, *, allow_unknown_features: bool = False) -> list[s
         raise ValueError("collection_mode must be live or historical")
     if mode == "live" and captured > off_time:
         raise ValueError("A live card cannot be captured after off_time")
+    late_sources = card.get("retrieval_after_cutoff", False)
+    if not isinstance(late_sources, bool):
+        raise ValueError("retrieval_after_cutoff must be a boolean")
+    if late_sources and mode != "historical":
+        raise ValueError("retrieval_after_cutoff is only allowed for collection_mode: historical")
     if not isinstance(race.get("race_no"), int) or race["race_no"] < 1:
         raise ValueError("race.race_no must be a positive integer")
     if not isinstance(race.get("distance_m"), int) or race["distance_m"] <= 0:
@@ -222,8 +229,11 @@ def validate_card(card: dict, *, allow_unknown_features: bool = False) -> list[s
             raise ValueError(f"Source {source_id} excerpt must be a string")
         if source.get("retrieved_at"):
             retrieved = parse_ts(source["retrieved_at"], f"source {source_id} retrieved_at")
-            if strict_evidence and retrieved > cutoff:
-                raise ValueError(f"Source {source_id} was retrieved after data_cutoff")
+            if strict_evidence and retrieved > cutoff and not late_sources:
+                raise ValueError(
+                    f"Source {source_id} was retrieved after data_cutoff; for a post-hoc "
+                    "reconstruction set retrieval_after_cutoff: true with collection_mode: historical"
+                )
 
     runners = card.get("runners")
     if not isinstance(runners, list) or len(runners) < 2:
@@ -310,6 +320,11 @@ def validate_card(card: dict, *, allow_unknown_features: bool = False) -> list[s
         warnings.append("歷史重建資料：只可當回測輸入，唔可以冒充當日實時賽前預測。")
     if not strict_evidence:
         warnings.append("schema 1.0 卡：意圖證據未有逐字 quote，建議改用 schema 1.1。")
+    if late_sources:
+        warnings.append(
+            "事後重建：部分來源喺 data_cutoff 之後取得（retrieval_after_cutoff=true），"
+            "只可作回測輸入，唔可以當賽前快照。"
+        )
     return warnings
 
 
@@ -1271,6 +1286,25 @@ def command_value_backtest(args) -> dict:
     return report
 
 
+def resolve_calibration_method(requested: str, samples: int) -> tuple[str, str]:
+    """Resolve ``auto`` to Platt on small samples; isotonic needs enough points."""
+    if requested in {"isotonic", "platt"}:
+        return requested, "explicit"
+    method = "isotonic" if samples >= CALIBRATION_ISOTONIC_MIN_SAMPLES else "platt"
+    return method, f"auto(samples={samples}, threshold={CALIBRATION_ISOTONIC_MIN_SAMPLES})"
+
+
+def calibration_ece_guard(before: float, after: float, *, allow_worse: bool) -> None:
+    """Refuse to store a calibrator that makes the holdout worse than raw scores."""
+    if allow_worse:
+        return
+    if after > before + 1e-12:
+        raise ValueError(
+            f"Calibration made holdout ECE worse ({before:.4f} -> {after:.4f}). "
+            "Store it anyway with --allow-worse-calibration, or use --method platt / more samples."
+        )
+
+
 def prediction_calibration_points(record: dict, prediction: dict) -> list[tuple[float, int]]:
     """Flatten one race's probabilities without losing race-grouped normalisation."""
     winners = {
@@ -1341,7 +1375,8 @@ def command_calibrate(args) -> dict:
 
         scores = [point[0] for point in fit_points]
         labels = [point[1] for point in fit_points]
-        fitted = isotonic_fit(scores, labels) if args.method == "isotonic" else platt_fit(scores, labels)
+        method, method_policy = resolve_calibration_method(args.method, len(fit_points))
+        fitted = isotonic_fit(scores, labels) if method == "isotonic" else platt_fit(scores, labels)
         calibration_through = max(
             record["card"]["race"]["meeting_date"] for record, _ in post_predictions
         )
@@ -1356,7 +1391,8 @@ def command_calibrate(args) -> dict:
                 "created_at": now_iso(),
                 "calibrated_from": args.model_version,
                 "calibration": {
-                    "method": args.method,
+                    "method": method,
+                    "method_policy": method_policy,
                     "model": fitted,
                     "samples": len(fit_points),
                     "evaluation_samples": 0,
@@ -1393,8 +1429,13 @@ def command_calibrate(args) -> dict:
             )
         model["calibration"]["evaluation_samples"] = len(before_points)
         model["calibration"]["post_train_samples"] = len(fit_points) + len(before_points)
-        model["calibration"]["ece_before"] = expected_calibration_error(before_points)
-        model["calibration"]["ece_after"] = expected_calibration_error(after_points)
+        ece_before = expected_calibration_error(before_points)
+        ece_after = expected_calibration_error(after_points)
+        calibration_ece_guard(ece_before, ece_after, allow_worse=args.allow_worse_calibration)
+        model["calibration"]["ece_before"] = ece_before
+        model["calibration"]["ece_after"] = ece_after
+        model["calibration"]["ece_delta"] = round(ece_after - ece_before, 6)
+        model["calibration"]["accepted"] = True
         db.execute(
             "INSERT INTO models VALUES (?, ?, ?, ?)",
             (args.new_version, model["created_at"], model["algorithm"], canonical(model)),
@@ -1406,7 +1447,7 @@ def command_calibrate(args) -> dict:
                 event_id, args.new_version, "calibrated", now_iso(),
                 canonical({
                     "calibrated_from": args.model_version,
-                    "method": args.method,
+                    "method": method,
                     "samples": len(fit_points),
                     "evaluation_samples": len(before_points),
                     "fit_race_ids": fit_race_ids,
@@ -1415,6 +1456,69 @@ def command_calibrate(args) -> dict:
             ),
         )
     return model["calibration"] | {"model_version": args.new_version}
+
+
+def command_calibration_drift(args) -> dict:
+    with connect(args.db) as db:
+        kinds = {item.strip() for item in args.kinds.split(",") if item.strip()}
+        rows = db.execute(
+            "SELECT * FROM prediction_runs ORDER BY created_at, rowid"
+        ).fetchall()
+        selected: dict[tuple[str, str], object] = {}
+        for row in rows:
+            if kinds and row["forecast_kind"] not in kinds:
+                continue
+            if args.model_version != "all" and row["model_version"] != args.model_version:
+                continue
+            selected[(row["model_version"], row["race_id"])] = row
+
+        grouped: dict[str, dict[str, list[tuple[float, int]]]] = {}
+        for (version, race_id), row in selected.items():
+            result = latest_result(db, race_id)
+            if not result:
+                continue
+            card, _ = latest_card(db, race_id, row["snapshot_id"])
+            prediction = json.loads(row["payload_json"])
+            period = period_of(card["race"]["meeting_date"], mode=args.period)
+            points = prediction_calibration_points({"card": card, "result": result}, prediction)
+            grouped.setdefault(version, {}).setdefault(period, []).extend(points)
+
+        models = {}
+        for version, by_period in grouped.items():
+            model = None
+            if version not in {"market-baseline", "baseline"}:
+                try:
+                    model = get_model(db, version)
+                except ValueError:
+                    model = None
+            calibration = (model or {}).get("calibration") or {}
+            baseline = calibration.get("ece_after")
+            summary = summarize_periods(
+                by_period,
+                baseline_ece=baseline,
+                min_samples=args.min_samples,
+                threshold=args.threshold,
+            )
+            summary["baseline_source"] = (
+                "calibration.ece_after" if baseline is not None else "none"
+            )
+            models[version] = summary
+
+        report = {
+            "kind": "calibration-drift-v1",
+            "created_at": now_iso(),
+            "period": args.period,
+            "kinds": sorted(kinds) if kinds else "all",
+            "models": models,
+            "drift_detected": any(item["drift_detected"] for item in models.values()),
+        }
+        evaluation_id = "ev_" + uuid.uuid4().hex
+        db.execute(
+            "INSERT INTO evaluation_runs VALUES (?, ?, ?, ?, ?)",
+            (evaluation_id, "calibration-drift", args.model_version, report["created_at"], canonical(report)),
+        )
+        report["evaluation_id"] = evaluation_id
+    return report
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1533,10 +1637,28 @@ def build_parser() -> argparse.ArgumentParser:
     calibrate.add_argument("--db", required=True)
     calibrate.add_argument("--model-version", required=True)
     calibrate.add_argument("--new-version", required=True)
-    calibrate.add_argument("--method", choices=["isotonic", "platt"], default="isotonic")
+    calibrate.add_argument(
+        "--method", choices=["auto", "isotonic", "platt"], default="auto",
+        help="auto uses isotonic only with at least 500 fit points, else Platt",
+    )
+    calibrate.add_argument(
+        "--allow-worse-calibration", action="store_true",
+        help="Store the calibrator even when it makes holdout ECE worse",
+    )
     calibrate.add_argument("--min-train-races", type=int, default=50)
     calibrate.add_argument("--min-samples", type=int, default=200)
     calibrate.add_argument("--output")
+
+    drift = sub.add_parser(
+        "calibration-drift", help="Per-period ECE against the calibration baseline"
+    )
+    drift.add_argument("--db", required=True)
+    drift.add_argument("--model-version", default="all")
+    drift.add_argument("--period", choices=["month", "meeting"], default="month")
+    drift.add_argument("--kinds", default="pre-race")
+    drift.add_argument("--min-samples", type=int, default=100)
+    drift.add_argument("--threshold", type=float, default=0.02)
+    drift.add_argument("--output")
 
     promote = sub.add_parser("promote", help="Promote only an eligible model; otherwise record rejection")
     promote.add_argument("--db", required=True)
@@ -1571,6 +1693,7 @@ def main() -> int:
             "backtest": command_backtest,
             "value-backtest": command_value_backtest,
             "calibrate": command_calibrate,
+            "calibration-drift": command_calibration_drift,
             "promote": command_promote,
         }
         result = handlers[args.command](args)

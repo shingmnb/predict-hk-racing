@@ -45,6 +45,8 @@
 - 意圖證據要保留逐字 `quote`，並把讀到嘅原文段落放入 `source.excerpt`；程式會核對兩者。寫唔出逐字原文，就唔好當證據。
 - `place_slots` 唔填會按 `declared_starters` 自動推導（本地賽 7 匹或以上 3 位、4-6 匹 2 位；少於 4 匹只係 1 位模型近似，唔代表有正式 Place pool）。
 
+更完整的消息來源分級、claim 對應與賽日 SOP 見 [intel-sources.md](intel-sources.md)。
+
 ## 缺口處理
 
 - 將缺口分成「核心欄位缺失」「部分特徵缺失」「無法核實意圖」三類，喺報告列明。

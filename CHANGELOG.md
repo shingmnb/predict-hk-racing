@@ -38,6 +38,27 @@
 - `calibrate` 記錄 `through`（校準用到的日期上限）；測試窗與校準資料重疊時直接報錯並建議 `--test-after`，避免用未來校準器評分過去場次。
 - `promote` 拒絕修復前或 `calibration_through` 錯配的校準版回測證據，避免用未校準表現批准校準模型。
 
+### Added (calibration guard & value diagnostics)
+
+- `calibrate --method auto`：fit points < 500 時自動改用 Platt，避免小樣本 isotonic 過擬合。
+- `calibrate` 預設拒絕令 holdout ECE 變差的校準器（`--allow-worse-calibration` 可覆寫）。
+- 校準輸出 clamp 到 `[0.001, 0.99]` 再 normalise。
+- `value-backtest` 報告 `roi_ci95`、`max_single_stake_fraction`、`profit_concentration`。
+- `tools/package_skill.py` 加 UTF-8 stdio 護欄（zh-HK Windows 中文路徑唔會再 encode error）。
+
+### Added (post-hoc reconstruction channel)
+
+- Schema 1.1 卡可以加 `retrieval_after_cutoff: true`（只限 `collection_mode: historical`），明確標示來源喺 data_cutoff 之後取得；會出「事後重建」warning，`live` 卡用會被拒。
+
+### Added (calibration drift)
+
+- `calibration-drift` 命令：按月／逐賽日計 live ECE，對比 `calibration.ece_after`，超過門檻標示 drift；樣本不足期間只作參考。
+- `scripts/drift.py`：period 分桶與 drift 判定（可直接單元測試）。
+
+### Added (intel sources)
+
+- `references/intel-sources.md`：A/B/C 級消息來源、來源→claim 對應表、賽日 SOP、高價值信號、以及用 intel-only / `--ablate intel` 驗證情報價值的方法。
+
 ## [0.2.0] - 2026-10-24
 
 ### Added

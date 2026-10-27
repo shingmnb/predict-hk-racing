@@ -20,6 +20,7 @@ description: >-
 ## 按需讀取資源
 
 - 搜集、核實及保存資料前，讀 [data-collection.md](references/data-collection.md)。
+- 搜集消息、判斷邊條消息有用前，讀 [intel-sources.md](references/intel-sources.md)。
 - 評估「去馬／保留／備戰」前，讀 [intent-model.md](references/intent-model.md)。
 - 設計「消息主導、賠率只作參考」的評分／否決權／輸出格式前，讀 [intel-first-odds-reference.md](references/intel-first-odds-reference.md)。
 - 建概率、訓練、回測或修正模型前，讀 [modeling-and-backtesting.md](references/modeling-and-backtesting.md)。
