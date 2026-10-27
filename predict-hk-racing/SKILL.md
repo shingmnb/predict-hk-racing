@@ -20,6 +20,7 @@ description: >-
 ## 按需讀取資源
 
 - 搜集、核實及保存資料前，讀 [data-collection.md](references/data-collection.md)。
+- 由零開始取得原件、T-60／T-10 賠率、歷史樣本或截圖轉錄時，讀 [data-acquisition-guide.md](references/data-acquisition-guide.md)。
 - 搜集消息、判斷邊條消息有用前，讀 [intel-sources.md](references/intel-sources.md)。
 - 評估「去馬／保留／備戰」前，讀 [intent-model.md](references/intent-model.md)。
 - 建概率、訓練、回測或修正模型前，讀 [modeling-and-backtesting.md](references/modeling-and-backtesting.md)。
@@ -82,7 +83,7 @@ python "<SKILL>/scripts/racing_lab.py" predict \
 先講資料時點、模型版本同限制，再輸出：
 
 | 馬號／馬名 | 勝出概率 | 位置概率 | 公平倍數 | 當時賠率 | 去馬支持度／置信 | 核心理據 |
-|---|---:|---:|---:|---:|---|---|
+|---|---:|---:|---:|---:|---:|---|
 
 - 概率用一位小數百分比，公平倍數用合理小數；唔好製造多餘精度。
 - 跟住列主要馬匹嘅「支持去馬／反對去馬／未知」三欄證據，並附實際來源引用。
