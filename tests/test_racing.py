@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import math
@@ -1985,5 +1985,78 @@ class CalibrationDriftUnitTests(unittest.TestCase):
         self.assertIsNone(report["periods"][0]["delta_vs_baseline"])
 
 
+class ObsidianSyncTests(unittest.TestCase):
+    def setUp(self):
+        sys.path.insert(0, str(ROOT / "tools"))
+        import obsidian_sync
+
+        self.sync = obsidian_sync
+
+    def test_legacy_picks_note_becomes_partial_cards(self):
+        note = """---
+title: fixture
+date: 2026-06-24
+venue: Happy Valley
+---
+
+| Race | Dist | Class | Pick 1 | Pick 2 | Pick 3 | Pick 4 | Top-4 Hits | Brier |
+|------|------|-------|--------|--------|--------|--------|------------|-------|
+| R1 | 2200m | C5 | #3 Alpha 🥇 | #4 Beta 🥈 | #5 | #6 | 2/4 | 1.25 |
+| R2 | 1650m | C5 | N/A | N/A | N/A | N/A | N/A | N/A |
+"""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "2026-06-24 HV.md"
+            path.write_text(note, encoding="utf-8")
+            cards, results, stats = self.sync.legacy_note_to_records(path)
+        self.assertEqual(stats["cards"], 1)
+        self.assertEqual(cards[0]["race"]["race_id"], "2026-06-24-HV-R1")
+        self.assertEqual(cards[0]["race"]["venue"], "HV")
+        self.assertEqual(len(cards[0]["runners"]), 4)
+        self.assertTrue(cards[0]["partial"])
+        self.assertEqual(len(results), 1)
+        positions = {row["horse_no"]: row["finish_position"] for row in results[0]["results"]}
+        self.assertEqual(positions, {3: 1, 4: 2})
+
+    def test_canonical_note_round_trips(self):
+        card = {
+            "schema_version": "1.1",
+            "collection_mode": "historical",
+            "captured_at": "2026-06-24T09:00:00+08:00",
+            "data_cutoff": "2026-06-24T09:00:00+08:00",
+            "race": {
+                "race_id": "2026-06-24-HV-R1", "meeting_date": "2026-06-24", "venue": "HV",
+                "race_no": 1, "off_time": "2026-06-24T19:15:00+08:00", "distance_m": 1200,
+                "place_slots": 3,
+            },
+            "sources": [{"source_id": "S1", "title": "fixture", "url": "https://example.invalid"}],
+            "runners": [
+                {"horse_no": 1, "horse_name": "Alpha", "jockey": "J1", "trainer": "T1",
+                 "draw": 1, "weight_lb": 120, "rating": 70, "win_odds": 3.5, "scratched": False},
+                {"horse_no": 2, "horse_name": "Beta", "jockey": "J2", "trainer": "T2",
+                 "draw": 2, "weight_lb": 118, "rating": 68, "win_odds": 4.0, "scratched": False},
+            ],
+        }
+        result = {"results": [{"horse_no": 1, "finish_position": 1, "win_dividend": 35.0}]}
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "note.md"
+            path.write_text(self.sync.note_for_card(card, result), encoding="utf-8")
+            parsed_card, parsed_result, problems = self.sync.canonical_note_to_records(path)
+        self.assertEqual(problems, [])
+        self.assertEqual(parsed_card["race"]["race_id"], "2026-06-24-HV-R1")
+        self.assertEqual(len(parsed_card["runners"]), 2)
+        self.assertEqual(parsed_card["runners"][0]["win_odds"], 3.5)
+        self.assertEqual(parsed_result["results"][0]["finish_position"], 1)
+
+    def test_venue_mapping(self):
+        self.assertEqual(self.sync.venue_code("Happy Valley"), "HV")
+        self.assertEqual(self.sync.venue_code("沙田"), "ST")
+        self.assertEqual(self.sync.venue_code("Goodwood"), "GD")
+
+
 if __name__ == "__main__":
     unittest.main()
+
