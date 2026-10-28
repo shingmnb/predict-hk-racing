@@ -590,6 +590,96 @@ class PipelineIntegrationTests(unittest.TestCase):
         self.assertFalse(model["training"]["stopped_early"])
         self.assertEqual(model["training"]["best_epoch"], 5)
 
+    def _write_card(self, card):
+        path = self.base / "cards" / f"card-{card['race']['race_id']}.json"
+        path.write_text(json.dumps(card, ensure_ascii=False), encoding="utf-8")
+        return path
+
+    def _write_odds(self, race_id, captured_at, entries):
+        payload = {
+            "race_id": race_id,
+            "captured_at": captured_at,
+            "source": {"source_id": "HKJC-WP", "title": "HKJC 獨贏賠率快照", "url": "https://bet.hkjc.com/"},
+            "odds": entries,
+        }
+        path = self.base / "cards" / f"odds-{race_id}-{captured_at.replace(':', '')}.json"
+        path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        return path
+
+    def test_import_odds_completes_market_and_preserves_history(self):
+        self.run_cli("init", "--db", self.db)
+        card, _ = self.make_card("2025-03-01", race_no=1, live=True)
+        for runner in card["runners"][:2]:
+            runner.pop("win_odds", None)
+        race_id = card["race"]["race_id"]
+        self.run_cli("import-card", "--db", self.db, "--file", self._write_card(card))
+
+        missing = [runner["horse_no"] for runner in card["runners"][:2]]
+        odds_file = self._write_odds(
+            race_id,
+            "2025-03-01T12:50:00+08:00",
+            [{"horse_no": number, "win_odds": 3.5} for number in missing],
+        )
+        result = json.loads(self.run_cli("import-odds", "--db", self.db, "--file", odds_file).stdout)
+        self.assertFalse(result["duplicate"])
+        self.assertEqual(sorted(result["updated_runners"]), sorted(missing))
+        self.assertEqual(result["market_completeness"], 1.0)
+
+        diagnosis = json.loads(
+            self.run_cli("diagnose-card", "--db", self.db, "--race-id", race_id).stdout
+        )["races"][0]
+        self.assertEqual(diagnosis["market_completeness"], 1.0)
+        self.assertEqual(diagnosis["missing_odds_horse_no"], [])
+        self.assertIsNotNone(diagnosis["odds_snapshot"])
+
+        connection = sqlite3.connect(self.db)
+        try:
+            snapshots = connection.execute(
+                "SELECT COUNT(*) FROM card_snapshots WHERE race_id = ?", (race_id,)
+            ).fetchone()[0]
+        finally:
+            connection.close()
+        self.assertEqual(snapshots, 2)  # 舊快照冇被覆寫
+
+        prediction_path = self.base / "predictions" / "p1.json"
+        self.run_cli(
+            "predict", "--db", self.db, "--race-id", race_id,
+            "--model-version", "baseline", "--historical", "--output", prediction_path,
+        )
+        prediction = json.loads(prediction_path.read_text(encoding="utf-8"))
+        self.assertTrue(prediction["market_complete"])
+        self.assertEqual(prediction["market_completeness"], 1.0)
+
+    def test_import_odds_rejects_unknown_horse(self):
+        self.run_cli("init", "--db", self.db)
+        card, _ = self.make_card("2025-03-02", race_no=1, live=True)
+        race_id = card["race"]["race_id"]
+        self.run_cli("import-card", "--db", self.db, "--file", self._write_card(card))
+        bad = self._write_odds(race_id, "2025-03-02T12:50:00+08:00", [{"horse_no": 99, "win_odds": 4.0}])
+        completed = self.run_cli("import-odds", "--db", self.db, "--file", bad, ok=False)
+        self.assertIn("unknown horse_no", completed.stdout + completed.stderr)
+
+    def test_import_odds_rejects_duplicate_horse(self):
+        self.run_cli("init", "--db", self.db)
+        card, _ = self.make_card("2025-03-03", race_no=1, live=True)
+        race_id = card["race"]["race_id"]
+        self.run_cli("import-card", "--db", self.db, "--file", self._write_card(card))
+        bad = self._write_odds(
+            race_id, "2025-03-03T12:50:00+08:00",
+            [{"horse_no": 1, "win_odds": 4.0}, {"horse_no": 1, "win_odds": 5.0}],
+        )
+        completed = self.run_cli("import-odds", "--db", self.db, "--file", bad, ok=False)
+        self.assertIn("duplicate horse_no", completed.stdout + completed.stderr)
+
+    def test_import_odds_rejects_after_off_time(self):
+        self.run_cli("init", "--db", self.db)
+        card, _ = self.make_card("2025-03-04", race_no=1, live=True)
+        race_id = card["race"]["race_id"]
+        self.run_cli("import-card", "--db", self.db, "--file", self._write_card(card))
+        late = self._write_odds(race_id, "2025-03-04T13:30:00+08:00", [{"horse_no": 1, "win_odds": 4.0}])
+        completed = self.run_cli("import-odds", "--db", self.db, "--file", late, ok=False)
+        self.assertIn("after off_time", completed.stdout + completed.stderr)
+
     def test_end_to_end_and_safety_guards(self):
         self.run_cli("init", "--db", self.db)
         for index in range(8):
