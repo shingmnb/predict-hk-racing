@@ -1,12 +1,5 @@
 # 資料格式與命令
 
-## 目錄
-- 檔案與狀態
-- Race card
-- Result
-- 完整命令流程
-- 模型與紀錄
-
 ## 檔案與狀態
 
 將用戶資料放當前工作區，唔好寫入 managed skill 目錄：
@@ -15,14 +8,15 @@
 racing-data/
 ├── racing.db
 ├── cards/          # 每次賽前／臨場快照
+├── analyses/       # 已凍結情報分析（核心輸出）
 ├── results/        # 官方賽果快照
-├── predictions/    # 已凍結概率
+├── predictions/    # 已驗證模型嘅概率輸出（可選）
 ├── models/         # 候選模型配置
 ├── evaluations/    # 評估及回測報告
 └── sources/        # 可合法保存嘅原始資料
 ```
 
-複製 `assets/race-card-template.json` 及 `assets/race-result-template.json` 開始。以下命令中的 `<SKILL>` 指本 Skill 根目錄；所有腳本只用 Python 標準庫。
+複製 `assets/race-card-template.json` 及 `assets/race-result-template.json` 開始。`<SKILL>` 指本 Skill 根目錄；所有腳本只用 Python 標準庫。
 
 ## Race card
 
@@ -30,7 +24,7 @@ racing-data/
 
 ```json
 {
-  "schema_version": "1.0",
+  "schema_version": "1.1",
   "collection_mode": "live",
   "captured_at": "2026-10-24T20:00:00+08:00",
   "data_cutoff": "2026-10-24T20:00:00+08:00",
@@ -49,12 +43,11 @@ racing-data/
 }
 ```
 
-每匹 runner 必填 `horse_no`、`horse_name`、`scratched`；建議加入 `horse_id`、`jockey`、`trainer`、`draw`、`weight_lb`、`rating`、`win_odds`、`place_odds`。
+每匹 runner 必填 `horse_no`、`horse_name`、`scratched`；建議加入 `horse_id`、`jockey`、`trainer`、`draw`、`weight_lb`、`rating`。`win_odds`、`place_odds` 係可選原始市場觀察，只保存當時數值，唔會轉成概率或模型特徵。
 
-`features` 只放數值。模型可直接用 `features` 內欄名，亦可用 runner 頂層 `rating`、`draw`、`weight_lb`。兩個自動特徵：
+`features` 只放數值。模型可直接用 `features` 內欄名，亦可用 runner 頂層 `rating`、`draw`、`weight_lb`。自動特徵只有：
 
-- `market_logp`：完整全場獨贏賠率計出去水概率，再取 log。
-- `intent_centered`：由 `intent_evidence` 計出，範圍約 −1 至 +1。
+- `intent_centered`：由 `intent_evidence` 計出，範圍約 −1 至 +1；係候選情報特徵，唔係勝率。
 
 每項意圖證據格式：
 
@@ -70,11 +63,11 @@ racing-data/
 }
 ```
 
-`direction` 可用 `positive`、`negative`、`neutral` 或 1、−1、0。`strength` 係訊號強度，`confidence` 係來源及觀察可靠度，兩者都係 0–1。`source_id` 必須存在於 `sources`。
+`direction` 可用 `positive`、`negative`、`neutral` 或 1、−1、0。`strength` 同 `confidence` 都係 0–1，屬分析標籤而唔係已驗證權重。`source_id` 必須存在於 `sources`。
 
-Schema 1.1 起，每項證據亦要 `quote`：逐字摘錄來源原文（正規化後至少 8 字）。如果 `source` 有 `excerpt`，`quote` 必須真係出現喺節錄之內，否則 `import-card` 會拒絕。`excerpt` 同 `quote` 係防幻覺嘅核心，唔好自己改寫。
+Schema 1.1 起，每項證據要 `quote`：逐字摘錄來源原文（正規化後至少 8 字）。如果 `source` 有 `excerpt`，`quote` 必須真係出現喺節錄之內，否則 `import-card` 會拒絕。`excerpt` 同 `quote` 係防幻覺核心，唔好自己改寫。
 
-`features` 只准用 `scripts/domain.py` 註冊表入面嘅名稱；未註冊特徵會被拒絕（真要例外就用 `--allow-unknown-features`，等於自己承擔滲漏風險）。
+`features` 只准用 `scripts/domain.py` 註冊表嘅名稱；未註冊特徵會被拒絕。例外旗標 `--allow-unknown-features` 會關閉呢道防線，使用時要自己承擔滲漏風險。
 
 ## Result
 
@@ -91,133 +84,98 @@ Schema 1.1 起，每項證據亦要 `quote`：逐字摘錄來源原文（正規�
 }
 ```
 
-需要評估位置概率時，提供全部 active runners 名次。派彩可保留作另作投注審計，但唔會進入賽前特徵。
+需要評估位置概率時，提供全部 active runners 名次。派彩可保留作投注審計，但唔會進入賽前特徵。
 
-## 完整命令流程
-
-初始化及新增賽前快照：
+## 核心流程：匯入並凍結情報分析
 
 ```bash
 python "<SKILL>/scripts/racing_lab.py" init --db "racing-data/racing.db"
-python "<SKILL>/scripts/racing_lab.py" import-card --db "racing-data/racing.db" --file "racing-data/cards/race.json"
+python "<SKILL>/scripts/racing_lab.py" import-card \
+  --db "racing-data/racing.db" --file "racing-data/cards/race.json"
+python "<SKILL>/scripts/racing_lab.py" analyze \
+  --db "racing-data/racing.db" --race-id "2026-10-25-ST-R1" \
+  --output "racing-data/analyses/2026-10-25-ST-R1.json"
 ```
 
-凍結預測（`auto` 用最新 promoted，否則市場基準）：
+`analyze` 輸出 `kind: race-intelligence-analysis-v1`，逐匹包括：
+
+- `observed_features`、`deployment_support`；
+- `supporting_evidence`、`opposing_evidence`、`neutral_evidence`；
+- 每項證據嘅 `quote`、來源標題、URL 同擷取時間；
+- `unknowns`：冇證據或冇反證時會明確標記；
+- 可選 `win_odds_snapshot`／`place_odds_snapshot` 原始數值。
+
+輸出**冇** `win_probability`、`place_probability` 或公平倍數。部署支持度係未校準嘅證據整理，唔可以當勝率或代入注碼公式。
+
+臨場更新要先新增 card snapshot，再跑一次 `analyze`。每個 `run_id` 都保留。歷史重建必須用 `collection_mode: historical`；已有賽果後程式會拒絕補做假賽前分析。
+
+## 賽後記錄與評估
 
 ```bash
-python "<SKILL>/scripts/racing_lab.py" predict \
-  --db "racing-data/racing.db" \
-  --race-id "2026-10-25-ST-R1" \
-  --model-version auto \
-  --output "racing-data/predictions/2026-10-25-ST-R1.json"
+python "<SKILL>/scripts/racing_lab.py" import-result \
+  --db "racing-data/racing.db" --file "racing-data/results/race.json"
+python "<SKILL>/scripts/racing_lab.py" evaluate \
+  --db "racing-data/racing.db" --output "racing-data/evaluations/latest.json"
 ```
 
-臨場更新：先新增 card snapshot，再跑一次 `predict`。每個 `run_id` 都保留。歷史重建必須用 card 嘅 `collection_mode: historical`；已有賽果後程式會拒絕補做假賽前預測，真正歷史評估走 `backtest`。
+`evaluate` 只評分有完整概率欄嘅模型預測，會跳過 `analyze` 紀錄。預設只計 `pre-race`，報告列出 `scored_forecast_kinds` 同 `excluded_by_forecast_kind`；歷史重建用 `--kinds historical-reconstruction` 分開報告。`--all-kinds` 只作 legacy 用途。
 
-賽後結算及評估：
+情報本身嘅賽後核查係逐項檢查事實、反證、形勢假設及未知，唔好用賽果將意圖標成「證實／推翻」。
 
-```bash
-python "<SKILL>/scripts/racing_lab.py" import-result --db "racing-data/racing.db" --file "racing-data/results/race.json"
-python "<SKILL>/scripts/racing_lab.py" evaluate --db "racing-data/racing.db" --output "racing-data/evaluations/latest.json"
-```
-
-`evaluate` 預設只計 `pre-race` 預測，報告會列出 `scored_forecast_kinds` 同 `excluded_by_forecast_kind`。要覆盤歷史重建，用 `--kinds historical-reconstruction` 分開出報告；`--all-kinds` 只作 legacy 用途，唔建議用嚟計 KPI。
-
-訓練新候選版本：
+## 可選模型訓練與概率輸出
 
 ```bash
 python "<SKILL>/scripts/racing_lab.py" fit \
   --db "racing-data/racing.db" \
   --model-version "candidate-2026-10-24" \
-  --features "market_logp,intent_centered,rating,draw,weight_lb,cd_place_rate,recent_finish_mean,days_since_run" \
+  --features "intent_centered,rating,draw,weight_lb,cd_place_rate,recent_finish_mean,days_since_run" \
   --train-before "2026-10-24" \
-  --min-races 30 \
-  --min-feature-coverage 0.5 \
+  --min-races 30 --min-feature-coverage 0.5 \
   --output "racing-data/models/candidate-2026-10-24.json"
 ```
 
-向前滾動回測及升級：
+只有明確模型先可以 `predict`：
+
+```bash
+python "<SKILL>/scripts/racing_lab.py" predict \
+  --db "racing-data/racing.db" --race-id "2026-10-25-ST-R1" \
+  --model-version auto --output "racing-data/predictions/2026-10-25-ST-R1.json"
+```
+
+`auto` 只用最新 promoted；冇 promoted 會報錯並提示使用 `analyze`。`baseline`、`uniform-baseline` 或其他內部對照唔係合法賽日模型。模型輸出概率同原始賠率快照，但唔附公平倍數。
+
+## 向前回測、消融及升級
 
 ```bash
 python "<SKILL>/scripts/racing_lab.py" backtest \
-  --db "racing-data/racing.db" \
-  --model-version "candidate-2026-10-24" \
-  --min-train-races 30 \
-  --min-test-races 50 \
-  --refit-every 5 \
-  --bootstrap 1000 \
+  --db "racing-data/racing.db" --model-version "candidate-2026-10-24" \
+  --min-train-races 30 --min-test-races 50 --refit-every 5 --bootstrap 1000 \
   --output "racing-data/evaluations/backtest-candidate-2026-10-24.json"
-python "<SKILL>/scripts/racing_lab.py" promote --db "racing-data/racing.db" --model-version "candidate-2026-10-24"
+python "<SKILL>/scripts/racing_lab.py" promote \
+  --db "racing-data/racing.db" --model-version "candidate-2026-10-24"
 ```
 
-`promote` 唔允許人手跳過門檻；未合資格會寫 `rejected`。做 ablation 唔需要另開版本：`fit` 用 `--block name=feature,feature` 宣告特徵塊，`backtest --ablate name` 會在同一測試窗口重跑一次（移除該塊）並出 paired bootstrap。每份報告保存 `source_model_hash`；required 證據必須完整、顯著而且同最新回測上下文一致，唔提供人手覆寫。報告列 `candidates_backtested`／`candidates_in_family`，promote 強制以 Bonferroni `effective_alpha = 0.05/n` 計調整後 CI 入閘（唔再只係提醒）；候選家族改變會標 `multiple_comparison_stale`，要先重跑 backtest 先可以再 promote。若入閘 comparison 嘅 bootstrap 樣本不足以解析 adjusted CI 下尾，報告會將 adjusted `ci` 留空、記錄 `ci_warning`／`bootstrap_resolution_warning` 並拒絕 promote；要增加 `--bootstrap` 或按預先登記準則收窄家族後重跑，唔會將 bootstrap 最小值當分位數。
+`backtest` 用均勻無資訊基準作內部對照，報告欄位係 `uniform_baseline`、`information_gain_vs_uniform`，gate 包括 `logloss_beats_uniform_baseline` 同 `brier_not_worse_than_uniform`。基準唔會出現喺賽日 `predict`。
 
-## 特徵塊：required vs optional
+`fit --block name=feature,feature` 宣告特徵塊，`backtest --ablate name` 喺同一測試窗口移除並做 paired bootstrap。`--required-block name` 要求該塊證明時間外增量；optional 未通過只記 `optional_blocks_unproven`。
 
-- `fit --block name=feature,feature`：宣告一個**可選**特徵塊；
-- `fit --block ... --required-block name`：標記為**必要**；required 名稱冇對應 `--block` 會直接報錯；
-- `backtest --ablate name`：逐個 block 做配對 ablation（paired bootstrap）；
-- 每個 **required** block 都要各自通過；`promote` 只累積同一 source model hash、方法／窗口、champion、candidate／baseline／逐場數據、候選家族同 alpha 嘅 `evaluation_runs`，並喺 `required_block_ablation_evidence` 記錄 evaluation id。呢個係 per-block necessity，唔代表 joint necessity；
-- optional block 若未通過，只記入 `optional_blocks_unproven`，唔會否決模型或佔用入閘 bootstrap resolution；程式唔會自動剔除，合理做法係另 fit 一個移除該塊嘅新版本；
-- `required_block_ablation_missing` 非空時，promote 一定拒絕。舊模型冇 `required_blocks` key 時，仍要求 latest backtest 有顯著 ablation，唔會跨 run 累積。
+`promote` 唔允許人手跳過門檻；未合資格會寫 `rejected`。候選家族以 Bonferroni 調整，家族改變會標 `multiple_comparison_stale`；bootstrap 解析度不足時 adjusted CI 留空並拒絕升級。詳見 [modeling-and-backtesting.md](modeling-and-backtesting.md)。
 
 ## 校準命令
 
 ```bash
 python "<SKILL>/scripts/racing_lab.py" calibrate \
-  --db "racing-data/racing.db" \
-  --model-version "candidate-2026-10-24" \
-  --new-version "candidate-2026-10-24-cal" \
-  --method isotonic --min-train-races 50 --min-samples 200
+  --db "racing-data/racing.db" --model-version "candidate-2026-10-24" \
+  --new-version "candidate-2026-10-24-cal" --method auto \
+  --min-train-races 50 --min-samples 200
 ```
 
-- 固定未校準嘅 source model，只用 `meeting_date >= train_before` 嘅已完成場次預測，再 fit isotonic 或 Platt；唔會 refit fold model，亦唔會退回訓練窗；
-- 窗後最後 25% 場次（向上取整、至少一場）係獨立 evaluation holdout，較早場次先係 fit points；`--min-samples` 檢查 fit points，`samples` 係 fit runner 數，`evaluation_samples` 係 holdout runner 數，`post_train_samples` 係兩者合計；
-- `ece_before`／`ece_after` 只用同一批較後 holdout；after 會逐場套用校準、全場重新 normalise，唔會逐匹單點套用或重用 fit points；
-- config 記錄 fit／evaluation race IDs、場數、日期範圍同 `train_before` 分界；結果存成**新版本**（append-only，唔改舊 model）；
-- `predict --model-version <new>` 會自動逐場套用、重新 normalise，輸出 `calibration` 欄位同樣本來源；
-- 窗後場次或 fit 樣本不足會直接報錯並話你知欠幾多，唔會用訓練窗 in-sample 預測偷偷擬合。
-
-> **校準版只可以在校準資料之後的場次評估。** `backtest`／`value-backtest` 會讀
-> `calibration.through`；如果測試窗第一場 ≤ through，會直接報錯並建議 `--test-after`，
-> champion 比較亦一樣。報告會寫 `calibration_applied` 同 `calibration_through`。
-> `promote` 會以 `calibration_evidence_required`／`calibration_evidence_valid` 記錄並執行
-> 校準證據檢查：舊報告、source model hash 或 through 錯配都會拒絕。因為校準用「現在為止所有
-> post-training 場次」，校準完要等新賽事入庫才有合法回測窗口；長遠應做「逐窗前移校準」。
-
-- `--method auto`（預設）：fit points ≥ 500 用 isotonic，否則用 Platt（小樣本 isotonic 會過擬合）。
-- `--allow-worse-calibration`：預設**拒絕**「holdout ECE 變差」的校準器；加旗標才會照存。
-- 校準輸出 clamp 到 `[0.001, 0.99]` 再 normalise，避免單點極端映射令 log loss 爆炸。
-- 注意：ECE 只檢查 holdout；之後的分布漂移仍然要靠 `backtest` 的 window guard 把關。
-
-## 價值與選擇性使用
-
-```bash
-python "<SKILL>/scripts/racing_lab.py" value-backtest \
-  --db "racing-data/racing.db" \
-  --model-version "candidate-2026-10-24" \
-  --stake kelly --cap 0.01 --bankroll 10000 \
-  --kelly-multiplier 0.25 --max-race-fraction 0.05 \
-  --test-after "2026-10-24" \
-  --output "racing-data/evaluations/value.json"
-```
-
-- `--stake flat|kelly`：flat 沿用固定比例、最大 edge 單注；kelly 統一用 `scripts/staking.py` 嘅 fractional Kelly，--cap 限制單注，--max-race-fraction 限制同場總曝險，--stake-unit 控制向下取整。
-- 可另輸入 `--pool-size` 同 `--max-pool-fraction`（預設 0.001）限制彩池衝擊；pool size 係回測假設，會寫入報告，唔係自動觀測嘅歷史數據。
-- 結算優先用官方 `win_dividend`（香港以每 HK$10 報價，程式除以 10），冇先用快照賠率。
-- 報 turnover、ROI、strike rate、max drawdown、期末 bankroll；Kelly 會放大概率估計誤差，ROI 必須由時間外結算證明，唔好預設正回報。
-- `evaluate --coverage 5,10,20,50` 會按預測信心分層，報每層 log loss／Brier／命中率（selective-use），用嚟答「只買邊啲場」。
-
-`settlement` 另外報三個風險指標：
-
-- `roi_ci95`：按場次 bootstrap（1,000 次）的 ROI 95% 區間；
-- `max_single_stake_fraction`：單注最大佔當時 bankroll 比例；
-- `profit_concentration`：最佳一場佔總利潤比例（越接近 1 表示盈利越集中、越不可靠）。
-
-- **事後重建**：如果卡片係由官方賽果頁事後重建（來源一定喺 `data_cutoff` 之後才取得），
-  可以喺 card 加 `retrieval_after_cutoff: true`，並保持 `collection_mode: historical`；
-  程式會接受並在 warnings 標明「事後重建」，但呢類卡永遠唔可以當賽前快照。
-  `live` 卡加呢個旗標會被拒絕。
+- 固定未校準 source model，只用 `meeting_date >= train_before` 嘅場次；最後 25% 係獨立 evaluation holdout。
+- `ece_before`／`ece_after` 只用同一批較後 holdout；套用時逐場全場重新 normalise。
+- `--method auto`：fit points ≥ 500 用 isotonic，否則用 Platt。
+- holdout ECE 變差預設拒絕；`--allow-worse-calibration` 先會照存。
+- 校準輸出 clamp 到 `[0.001, 0.99]` 再 normalise。
+- 校準版只可以在 `calibration.through` 之後嘅場次評估；`promote` 會核對 source hash、calibration applied 同 through。
 
 ## 校準漂移監控
 
@@ -226,27 +184,37 @@ python "<SKILL>/scripts/racing_lab.py" calibration-drift \
   --db "racing-data/racing.db" --model-version all --period month --min-samples 100
 ```
 
-- 按 `meeting_date` 分月（或 `--period meeting` 逐賽日）計 ECE；
-- 基準係模型的 `calibration.ece_after`（冇就用 `none`，只報 ECE）；
-- `samples < --min-samples` 的期間只作參考，不會標記 drift；
-- `delta > --threshold`（預設 0.02）就標 `drift: true`，並列出 `drifted_periods`；
-- 報告存入 `evaluation_runs`（kind `calibration-drift`）。
+按 `meeting_date` 分月或逐賽日計 ECE，同模型 `calibration.ece_after` 比較。樣本不足只作參考；`delta > --threshold` 標記 drift。情報分析冇概率，唔會產生校準點。
 
-## 位置名額與特徵註冊
+## 可選價值回測
 
-`place_slots` 可以省略：程式會用 `declared_starters`（冇填就用 active runners）按本地賽規則推導——7 匹或以上 3 位、4-6 匹 2 位。少於 4 匹時嘅 1 位只係模型近似，唔代表有正式 Place pool。若果你寫死一個同 field size 唔相符嘅值，`import-card` 會出 warning 並照用你嘅值（例如有馬退出但 declared starters 未變）。
+```bash
+python "<SKILL>/scripts/racing_lab.py" value-backtest \
+  --db "racing-data/racing.db" --model-version "candidate-2026-10-24" \
+  --stake kelly --cap 0.01 --bankroll 10000 \
+  --kelly-multiplier 0.25 --max-race-fraction 0.05 \
+  --test-after "2026-10-24" --output "racing-data/evaluations/value.json"
+```
 
-特徵註冊表喺 `scripts/domain.py`：每個特徵要寫低單位、來源同定義。加新特徵就喺 `SPECS` 加一項，順手喺 `references/modeling-and-backtesting.md` 講清楚點樣保證佢喺 `data_cutoff` 前已存在。
+只接受實際模型版本，唔接受內部基準。結算優先用官方 `win_dividend`（香港以每 HK$10 報價，程式除以 10），冇先用快照賠率。報 turnover、ROI、strike rate、max drawdown、期末 bankroll、ROI 區間、單注曝險及盈利集中度；唔好預設正回報。
+
+`evaluate --coverage 5,10,20,50` 可按模型最高概率分層報告 selective-use，唔適用於情報支持度。
+
+## 位置名額與歷史重建
+
+`place_slots` 可以省略：程式用 `declared_starters`（冇填就用 active runners）推導——7 匹或以上 3 位、4-6 匹 2 位。少於 4 匹嘅 1 位只係模型近似，唔代表有正式 Place pool。
+
+如果卡片由官方賽果頁事後重建、來源喺 `data_cutoff` 後先取得，可加 `retrieval_after_cutoff: true` 並保持 `collection_mode: historical`。程式會警告，但呢類卡永遠唔可以當賽前快照；`live` 卡使用會被拒絕。
 
 ## 模型與紀錄
 
-SQLite 保存 race card、result、prediction、model、model event、evaluation。主要紀錄表禁止 update/delete；修正方法係新增快照或版本。
+SQLite 保存 race card、result、analysis／prediction、model、model event、evaluation。主要紀錄表禁止 update/delete；修正方法係新增快照或版本。
 
 - `card_snapshots`：同一場不同資料截止時間。
-- `prediction_runs`：某快照、某模型嘅不可變概率。
+- `prediction_runs`：保存不可變情報分析或模型概率；用 `kind`／`algorithm` 區分，評估只讀概率輸出。
 - `result_snapshots`：官方結果及更正。
 - `models`：特徵、係數、標準化、填補值、訓練窗口、hyperparameters。
 - `model_events`：fitted、promoted、rejected。
 - `evaluation_runs`：正式預測評估及 walk-forward 報告。
 
-預設 30 場只係可訓練下限、50 場只係可評估下限，唔代表統計上一定足夠。真實使用應按賽事類型、特徵數及漂移風險增加樣本；測試小樣本只可用嚟驗證程式，唔好用嚟宣稱模型有效。
+預設 30 場只係可訓練下限、50 場只係可評估下限，唔代表統計上一定足夠。測試小樣本只可用嚟驗證程式，唔好用嚟宣稱模型有效。

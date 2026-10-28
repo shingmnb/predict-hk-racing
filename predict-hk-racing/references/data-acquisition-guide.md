@@ -159,7 +159,7 @@ market_blind           = true（只有確實未見任何賠率才可使用）
 
 這只是 runner 片段，不是可單獨匯入的完整 race-card。
 
-### 5.3 匯入與凍結市場參考
+### 5.3 匯入與凍結情報分析
 
 完成整份 race-card 後：
 
@@ -168,14 +168,13 @@ python "<SKILL>/scripts/racing_lab.py" import-card \
   --db "racing-data/racing.db" \
   --file "racing-data/cards/<race_id>_<snapshot>.json"
 
-python "<SKILL>/scripts/racing_lab.py" predict \
+python "<SKILL>/scripts/racing_lab.py" analyze \
   --db "racing-data/racing.db" \
   --race-id "<race_id>" \
-  --model-version auto \
-  --output "racing-data/predictions/<race_id>_<snapshot>.json"
+  --output "racing-data/analyses/<race_id>_<snapshot>.json"
 ```
 
-沒有 promoted 模型時，輸出是**市場去水參考概率及市場 fair odds**，不是 AI 優勢或值博證明。T-10 必須新增 card snapshot 和 prediction run；開跑後不得補做 live 預測或修改舊輸出。
+輸出保存逐匹情報、反證、未知項及原始賠率快照，不附勝出率或公平倍數。T-10 必須新增 card snapshot 和 analysis run；開跑後不得補做 live 分析或修改舊輸出。只有另行訓練並通過回測的模型才使用 `predict`。
 
 ## 6. 第四步：賽後取得官方結果並結算
 
@@ -213,8 +212,8 @@ python "<SKILL>/scripts/racing_lab.py" evaluate \
 
 | 歷史場次資料狀態 | 可以做甚麼 | 不可以做甚麼 |
 |---|---|---|
-| 合格賽前卡＋所需特徵＋同時點市場＋結果 | 按模型定義列入相應歷史樣本及市場回測 | 冒充當日 live 預測或 forward KPI |
-| 有賽前卡及結果，但缺市場 | 按覆蓋規則評估不依賴市場的特徵；明確列缺口 | 計入市場對照、市場 fair odds 或值博回測 |
+| 合格賽前卡＋所需特徵＋原始市場快照＋結果 | 按模型定義列入相應歷史樣本及可選值博回測 | 冒充當日 live 預測或 forward KPI |
+| 有賽前卡及結果，但缺市場 | 情報分析及不依賴市場嘅模型訓練／評估；明確列缺口 | 計入市場消息對照或值博回測 |
 | 只有賽果／最終賠率 | 工程測試、結果及收市參考 | 當成完整 T-60 樣本，或補寫當時基本面盲選 |
 
 建立 coverage ledger，逐場記 `eligible_for`、`excluded_reason`、每項特徵覆蓋及證據缺口。**200+ 下載場數不等於 200+ 有效樣本；不得為湊數放寬時點規則。**樣本達預先登記要求後，才按 [modeling-and-backtesting.md](modeling-and-backtesting.md) 做 `fit`、walk-forward、消融及 `promote`。
@@ -238,11 +237,11 @@ python "<SKILL>/scripts/racing_lab.py" evaluate \
 |---|---|
 | Captcha、登入、白名單或存取被拒 | 停止自動請求，保存錯誤與時間；改用合法公開原件或人工下載 |
 | PDF「資料截至」早於賽日，但不知何時發布 | 內容時點照記，另找首次可用證明；找不到就標時點缺口 |
-| 只有部分馬賠率 | 標不完整，不計完整市場去水基準，不以其他時點補齊 |
+| 只有部分馬賠率 | 標原始市場資料不完整，不以其他時點補齊；情報分析照樣可做 |
 | OCR 與頁面數字不同 | 以原件為準，保留修正紀錄；核心欄位未核對前停止匯入 |
 | 後備馬 S1／S2 | 放 `reserve_runners`，不要當普通數字馬號 |
 | 開跑後才找到舊資料 | 只可作 historical；必須另證明它在 cutoff 前已可用 |
-| 已有賽果後想重跑舊預測 | 不得改寫舊 live 預測；新增明確標記的歷史重建並分開評估 |
+| 已有賽果後想重跑舊分析 | 不得改寫舊 live 分析；新增明確標記的歷史重建並分開評估 |
 
 ## 10. 一場完成後的驗收清單
 
@@ -251,10 +250,10 @@ python "<SKILL>/scripts/racing_lab.py" evaluate \
 □ data_cutoff <= off_time，所有特徵只使用截止前版本
 □ 全場馬號、馬名、騎練、退出、後備及核心欄位已核對
 □ 基本面在看賠率前封存；market_blind 沒有倒填
-□ T-60／T-10 各自是獨立、同場全馬、同一時點快照
+□ T-60／T-10 各自是獨立、同場全馬、同一時點原始快照
 □ 每條情報 quote 都能在來源 excerpt 逐字找到，並有反證／未知
 □ 最終賠率、名次及賽後評語沒有進入賽前卡
-□ import、predict、import-result 的舊版本均沒有被覆蓋
+□ import、analyze、import-result 的舊版本均沒有被覆蓋
 □ 另一位操作者可由原件與 manifest 重現相同輸出
 □ 報告同時列出缺口、排除樣本及陰性結果，沒有宣稱保證盈利
 ```

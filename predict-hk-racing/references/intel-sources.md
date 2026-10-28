@@ -73,7 +73,7 @@ Telegram／X 貼士頻道、YouTube 馬評、討論區。**永遠唔可以直接
 - 獸醫報告增補
 - **只核對 claim 的可觀察部分：事實是否準確、替代解釋是否出現、預測是否按原規則結算。**唔好用賽果把意圖標成「證實／推翻」；真正意圖 ground truth 通常不可取得
 
-## 由消息到概率的三條紀律
+## 由消息到判斷的三條紀律
 
 1. **去重**：同一新聞被十個媒體轉載 = 一個證據。
 2. **時效**：記錄 `observed_at` 與每項資料的適用窗口；「14 日減半／30 日只作背景」只能列候選假設，不得未經時間外驗證自動套用固定權重。
@@ -89,20 +89,23 @@ Telegram／X 貼士頻道、YouTube 馬評、討論區。**永遠唔可以直接
 
 ## 怎樣證明消息有價值
 
+首先用 `analyze` 保存當時情報，唔需要為每場硬出概率。要驗證情報對勝率有冇增量，先用同一批合格歷史快照訓練兩個可選模型：
+
 ```bash
-fit ... --model-version market-only --features market_logp
-fit ... --model-version intel-only  --features intent_centered,rating
-fit ... --model-version combined \
-  --features market_logp,intent_centered,rating --block intel=intent_centered
-backtest --model-version combined --ablate intel
+fit ... --model-version ability-only --features rating,draw
+fit ... --model-version with-intel \
+  --features intent_centered,rating,draw --block intel=intent_centered
+backtest --model-version with-intel --ablate intel
 ```
 
 | 結果 | 可以得出的結論 |
 |---|---|
-| intel-only 差過均勻模型 | 暫無證據支持情報有預測價值；保留陰性結果 |
-| intel-only 接近市場 | 只值得繼續驗證，不等於有獨立價值或應加大投入 |
-| combined 贏 market 且 `--ablate intel` 顯著 | 只是情報增量的其中一項證據；仍須通過校準、Brier、多重比較、champion 及全部 promote 門檻 |
-| 只有 combined 贏、ablate 不顯著 | 不可把改善歸因情報；不得宣稱情報有效 |
+| with-intel 差過均勻無資訊基準 | 暫無證據支持情報有預測價值；保留陰性結果 |
+| with-intel 接近 ability-only | 只值得繼續驗證，不等於情報有獨立價值 |
+| with-intel 改善且 `--ablate intel` 顯著 | 只係情報增量嘅其中一項證據；仍須通過校準、Brier、多重比較、champion 及全部 promote 門檻 |
+| 只有整體改善、ablate 不顯著 | 不可把改善歸因情報；不得宣稱情報有效 |
+
+無論模型結果如何，都要保留事實核查、反證同未知；一場輸贏唔可以證明或推翻馬房真正意圖。
 
 ## 賽日一頁 checklist
 
@@ -114,7 +117,7 @@ backtest --model-version combined --ablate intel
 □ 傷患紀錄（90 日）
 □ 試閘／晨操（同組比較）
 □ 馬房訪問原句（如有）
-□ 賠率快照（T-60 / T-10）
-□ 三條最強情報 + 一條反證
-□ 偏離市場 >15pp 的理由（如適用）
+□ 三條最強情報 + 每條反證／未知／撤回條件
+□ 可選原始賠率快照（T-60 / T-10），只記市場變化
+□ analyze 已凍結；冇模型時沒有硬出勝率
 ```

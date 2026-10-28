@@ -24,10 +24,6 @@ class FeatureSpec:
 
 SPECS = [
     FeatureSpec(
-        "market_logp", "log probability", "computed",
-        "Log of the de-vigged market win probability from the same race snapshot.",
-    ),
-    FeatureSpec(
         "intent_centered", "score -1..1", "computed",
         "Shrunk supporter-minus-opponent evidence score; see intent-model.md.",
     ),
@@ -44,7 +40,7 @@ SPECS = [
 ]
 
 FEATURE_REGISTRY: dict[str, FeatureSpec] = {spec.name: spec for spec in SPECS}
-AUTO_FEATURES = frozenset({"market_logp", "intent_centered"})
+AUTO_FEATURES = frozenset({"intent_centered"})
 
 
 def registered(name: str) -> bool:

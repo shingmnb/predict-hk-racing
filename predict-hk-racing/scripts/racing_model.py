@@ -86,76 +86,6 @@ def assess_intent(runner: dict) -> dict:
     }
 
 
-def shin_probabilities(inverse_odds: list[float]) -> list[float]:
-    """Shin (1993) de-vigging for a complete win book.
-
-    Simple normalisation (``p_i = (1/o_i) / Σ(1/o_j)``) spreads the overround
-    proportionally and therefore inherits the favourite–longshot bias: it
-    over-states longshots and under-states favourites. Shin models the book as
-    ``π_i = (1 - z) p_i + z p_i² / Σp`` where ``z`` is the insider share, and
-    solves for the ``z`` that makes the probabilities sum to one.
-
-    ``inverse_odds`` are raw ``1 / decimal_odds`` values (overround > 1).
-    """
-    book = sum(inverse_odds)
-    if book <= 0:
-        raise ValueError("inverse odds must be positive")
-    if book <= 1.0:
-        return [x / book for x in inverse_odds]
-
-    def probs(z: float) -> list[float]:
-        denom = 2.0 * (1.0 - z)
-        return [
-            (math.sqrt(z * z + 4.0 * (1.0 - z) * (x * x) / book) - z) / denom
-            for x in inverse_odds
-        ]
-
-    low, high = 0.0, 0.999999  # Σp decreases monotonically from √book to Σπ²/book
-    for _ in range(100):
-        mid = (low + high) / 2.0
-        if sum(probs(mid)) > 1.0:
-            low = mid
-        else:
-            high = mid
-    result = probs((low + high) / 2.0)
-    total = sum(result)
-    return [x / total for x in result]
-
-
-def market_probabilities(
-    runners: list[dict], method: str = "normalized"
-) -> tuple[dict[int, float], bool, float | None]:
-    """De-vigged win probabilities.
-
-    ``method``: ``normalized`` (default, backward compatible) or ``shin``
-    (favourite–longshot aware). Both return probabilities summing to 1 when the
-    book is complete; an incomplete book still falls back to uniform with a
-    ``False`` flag so callers can downgrade the run.
-    """
-    if method not in {"normalized", "shin"}:
-        raise ValueError(f"unknown de-vig method: {method}")
-    if not runners:
-        return {}, False, None
-    complete = all(
-        isinstance(r.get("win_odds"), (int, float))
-        and not isinstance(r.get("win_odds"), bool)
-        and math.isfinite(float(r["win_odds"]))
-        and float(r["win_odds"]) > 1.0
-        for r in runners
-    )
-    if complete:
-        keys = [runner_key(r) for r in runners]
-        inverse = [1.0 / float(r["win_odds"]) for r in runners]
-        book_sum = sum(inverse)
-        if method == "shin":
-            adjusted = shin_probabilities(inverse)
-        else:
-            adjusted = [x / book_sum for x in inverse]
-        return dict(zip(keys, adjusted)), True, book_sum - 1.0
-    uniform = 1.0 / len(runners)
-    return {runner_key(r): uniform for r in runners}, False, None
-
-
 def softmax(scores: list[float]) -> list[float]:
     if not scores:
         return []
@@ -258,9 +188,7 @@ def pair_probabilities(win_probs: list[float], slots: int = 3) -> dict[tuple[int
     return pairs
 
 
-def _raw_value(runner: dict, name: str, base_p: float, market_complete: bool):
-    if name == "market_logp":
-        return math.log(max(EPS, base_p)) if market_complete else None
+def _raw_value(runner: dict, name: str):
     if name == "intent_centered":
         return assess_intent(runner)["centered"]
     value = runner.get("features", {}).get(name, runner.get(name))
@@ -270,22 +198,15 @@ def _raw_value(runner: dict, name: str, base_p: float, market_complete: bool):
     return value if math.isfinite(value) else None
 
 
-def raw_feature_rows(card: dict, feature_names: list[str]):
-    runners = active_runners(card)
-    base, complete, overround = market_probabilities(runners)
-    rows = []
-    for runner in runners:
-        key = runner_key(runner)
-        rows.append({
-            "horse_no": key,
+def raw_feature_rows(card: dict, feature_names: list[str]) -> list[dict]:
+    return [
+        {
+            "horse_no": runner_key(runner),
             "runner": runner,
-            "base_p": base[key],
-            "features": [
-                _raw_value(runner, name, base[key], complete)
-                for name in feature_names
-            ],
-        })
-    return rows, complete, overround
+            "features": [_raw_value(runner, name) for name in feature_names],
+        }
+        for runner in active_runners(card)
+    ]
 
 
 def _normalisation(prepared: list[dict], feature_names: list[str]) -> dict:
@@ -495,7 +416,7 @@ def fit_model(
     skipped = []
     for record in records:
         card, result = record["card"], record["result"]
-        rows, market_complete, _ = raw_feature_rows(card, feature_names)
+        rows = raw_feature_rows(card, feature_names)
         winners = [
             int(r["horse_no"]) for r in result["results"]
             if r.get("finish_position") == 1 and r.get("status", "OK") != "SCRATCHED"
@@ -508,7 +429,6 @@ def fit_model(
             "race_id": card["race"]["race_id"],
             "rows": rows,
             "winner": winners[0],
-            "market_complete": market_complete,
         })
     if not prepared:
         raise ValueError("No usable completed races for training")
@@ -520,8 +440,6 @@ def fit_model(
 
     size = len(feature_names)
     beta = [0.0] * size
-    if "market_logp" in feature_names:
-        beta[feature_names.index("market_logp")] = 0.25
     adam_m = [0.0] * size
     adam_v = [0.0] * size
     race_count = len(prepared)
@@ -635,64 +553,108 @@ def apply_calibration(model: dict | None, probabilities: list[float]) -> list[fl
     return [value / total for value in adjusted]
 
 
-def predict_card(card: dict, model: dict | None = None, model_version: str = "market-baseline") -> dict:
+def analyze_card(card: dict) -> dict:
+    """Freeze auditable intelligence without inventing win probabilities."""
     runners = active_runners(card)
     if len(runners) < 2:
         raise ValueError("At least two active runners are required")
-    base, market_complete, overround = market_probabilities(runners)
-    warnings = []
-    if not market_complete:
-        warnings.append("獨贏賠率不完整：市場基準改用均勻概率，唔可以當有市場優勢。")
+    sources = {source.get("source_id"): source for source in card.get("sources", [])}
+    output_runners = []
+    for runner in runners:
+        intent = assess_intent(runner)
+        supporting, opposing, neutral = [], [], []
+        for item in runner.get("intent_evidence", []):
+            raw_direction = item.get("direction", "neutral")
+            direction = (
+                max(-1.0, min(1.0, float(raw_direction)))
+                if isinstance(raw_direction, (int, float))
+                else DIRECTIONS.get(str(raw_direction).lower(), 0.0)
+            )
+            source = sources.get(item.get("source_id"), {})
+            evidence = {
+                "signal": item.get("signal", "unspecified"),
+                "direction": direction,
+                "strength": max(0.0, min(1.0, float(item.get("strength", 0.5)))),
+                "confidence": max(0.0, min(1.0, float(item.get("confidence", 0.5)))),
+                "source_id": item.get("source_id"),
+                "source_title": source.get("title"),
+                "source_url": source.get("url"),
+                "retrieved_at": source.get("retrieved_at"),
+                "quote": item.get("quote"),
+                "note": item.get("note", ""),
+            }
+            if direction > 0:
+                supporting.append(evidence)
+            elif direction < 0:
+                opposing.append(evidence)
+            else:
+                neutral.append(evidence)
+        unknowns = []
+        if not runner.get("intent_evidence"):
+            unknowns.append("未提供可核實的去馬意圖證據。")
+        if not opposing:
+            unknowns.append("未記錄反證；呢個係資料缺口，唔代表冇反證。")
+        output_runners.append({
+            "horse_no": runner_key(runner),
+            "horse_name": runner.get("horse_name", ""),
+            "jockey": runner.get("jockey", ""),
+            "trainer": runner.get("trainer", ""),
+            "draw": runner.get("draw"),
+            "weight_lb": runner.get("weight_lb"),
+            "rating": runner.get("rating"),
+            "observed_features": runner.get("features", {}),
+            "deployment_support": intent,
+            "supporting_evidence": supporting,
+            "opposing_evidence": opposing,
+            "neutral_evidence": neutral,
+            "unknowns": unknowns,
+            "win_odds_snapshot": runner.get("win_odds"),
+            "place_odds_snapshot": runner.get("place_odds"),
+        })
+    return {
+        "kind": "race-intelligence-analysis-v1",
+        "race_id": card["race"]["race_id"],
+        "model_version": "intelligence-analysis",
+        "algorithm": "evidence-intelligence-v1",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "data_cutoff": card["data_cutoff"],
+        "race_context": card["race"],
+        "warnings": [
+            "呢份係情報分析，唔包含勝出率、位置概率或公平倍數。",
+            "部署支持度係未校準嘅證據整理，唔係內幕確認或去馬概率。",
+            "原始賠率只作可選市場消息參考，冇用嚟推算概率。",
+        ],
+        "runners": output_runners,
+        "scratched": [
+            {"horse_no": runner_key(r), "horse_name": r.get("horse_name", "")}
+            for r in card["runners"] if r.get("scratched", False)
+        ],
+    }
 
-    if model is None:
-        scores = [math.log(max(EPS, base[runner_key(r)])) for r in runners]
-        algorithm = "market-no-vig-v1"
-        model_version = "market-baseline"
-    else:
-        algorithm = model["algorithm"]
-        if algorithm != "conditional-logit-v1":
-            raise ValueError(f"Unsupported model algorithm: {algorithm}")
-        model_version = model.get("model_version", model_version)
-        feature_names = model["features"]
-        rows, _, _ = raw_feature_rows(card, feature_names)
-        by_horse = {row["horse_no"]: row for row in rows}
-        coefficients = [model["coefficients"][name] for name in feature_names]
-        scores = []
-        for runner in runners:
-            row = by_horse[runner_key(runner)]
-            vector = _vector(row, feature_names, model["normalisation"])
-            scores.append(_dot(coefficients, vector))
 
-    probabilities = softmax(scores)
-    calibration_meta = (model or {}).get("calibration")
-    if calibration_meta:
-        probabilities = apply_calibration(model, probabilities)
-        calibration_detail = (
-            f"{calibration_meta.get('source') or 'unknown'}，"
-            f"{calibration_meta.get('samples')} 個擬合樣本"
-        )
-        if calibration_meta.get("evaluation_samples") is not None:
-            calibration_detail += f"，{calibration_meta['evaluation_samples']} 個獨立評估樣本"
-        warnings.append(
-            f"已套用 {calibration_meta.get('method')} 校準（{calibration_detail}）。"
-        )
+def _probability_prediction(
+    card: dict,
+    probabilities: list[float],
+    *,
+    model_version: str,
+    algorithm: str,
+    calibration_meta: dict | None = None,
+    warnings: list[str] | None = None,
+) -> dict:
+    runners = active_runners(card)
     slots = min(int(card["race"].get("place_slots", 3)), len(runners))
     place = place_probabilities(probabilities, slots)
     output_runners = []
     for index, runner in enumerate(runners):
-        key = runner_key(runner)
-        intent = assess_intent(runner)
         output_runners.append({
-            "horse_no": key,
+            "horse_no": runner_key(runner),
             "horse_name": runner.get("horse_name", ""),
             "jockey": runner.get("jockey", ""),
             "trainer": runner.get("trainer", ""),
             "win_probability": probabilities[index],
             "place_probability": place[index],
-            "fair_win_odds": 1.0 / max(EPS, probabilities[index]),
-            "market_no_vig_probability": base[key],
             "win_odds_snapshot": runner.get("win_odds"),
-            "intent": intent,
+            "intent": assess_intent(runner),
         })
     output_runners.sort(key=lambda item: item["win_probability"], reverse=True)
     return {
@@ -706,16 +668,13 @@ def predict_card(card: dict, model: dict | None = None, model_version: str = "ma
                 "samples": calibration_meta.get("samples"),
                 "evaluation_samples": calibration_meta.get("evaluation_samples"),
             }
-            if calibration_meta
-            else None
+            if calibration_meta else None
         ),
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "data_cutoff": card["data_cutoff"],
         "place_slots": slots,
-        "market_complete": market_complete,
-        "market_overround": overround,
         "probability_note": "勝出概率全場合計為 1；位置概率用 Plackett-Luce 近似，唔係派彩保證。",
-        "warnings": warnings,
+        "warnings": warnings or [],
         "runners": output_runners,
         "scratched": [
             {"horse_no": runner_key(r), "horse_name": r.get("horse_name", "")}
@@ -724,8 +683,66 @@ def predict_card(card: dict, model: dict | None = None, model_version: str = "ma
     }
 
 
+def predict_card(card: dict, model: dict, model_version: str = "fitted-model") -> dict:
+    runners = active_runners(card)
+    if len(runners) < 2:
+        raise ValueError("At least two active runners are required")
+    if model is None:
+        raise ValueError("A fitted model is required; use analyze_card for intelligence-only output")
+    algorithm = model["algorithm"]
+    if algorithm != "conditional-logit-v1":
+        raise ValueError(f"Unsupported model algorithm: {algorithm}")
+    model_version = model.get("model_version", model_version)
+    feature_names = model["features"]
+    rows = raw_feature_rows(card, feature_names)
+    by_horse = {row["horse_no"]: row for row in rows}
+    coefficients = [model["coefficients"][name] for name in feature_names]
+    scores = []
+    for runner in runners:
+        row = by_horse[runner_key(runner)]
+        vector = _vector(row, feature_names, model["normalisation"])
+        scores.append(_dot(coefficients, vector))
+
+    probabilities = softmax(scores)
+    calibration_meta = model.get("calibration")
+    warnings = []
+    if calibration_meta:
+        probabilities = apply_calibration(model, probabilities)
+        calibration_detail = (
+            f"{calibration_meta.get('source') or 'unknown'}，"
+            f"{calibration_meta.get('samples')} 個擬合樣本"
+        )
+        if calibration_meta.get("evaluation_samples") is not None:
+            calibration_detail += f"，{calibration_meta['evaluation_samples']} 個獨立評估樣本"
+        warnings.append(f"已套用 {calibration_meta.get('method')} 校準（{calibration_detail}）。")
+    return _probability_prediction(
+        card, probabilities, model_version=model_version, algorithm=algorithm,
+        calibration_meta=calibration_meta, warnings=warnings,
+    )
+
+
+def uniform_baseline_card(card: dict) -> dict:
+    """Internal no-information comparator; never a daily race prediction."""
+    runners = active_runners(card)
+    if len(runners) < 2:
+        raise ValueError("At least two active runners are required")
+    return _probability_prediction(
+        card,
+        [1.0 / len(runners)] * len(runners),
+        model_version="uniform-baseline",
+        algorithm="uniform-no-information-v1",
+        warnings=["只作回測內部無資訊對照，唔係賽日預測或情報結論。"],
+    )
+
+
 def metric_row(card: dict, result: dict, prediction: dict) -> dict | None:
-    predicted = prediction["runners"]
+    predicted = prediction.get("runners", [])
+    if not predicted or any(
+        not isinstance(item.get("win_probability"), (int, float))
+        or not isinstance(item.get("place_probability"), (int, float))
+        for item in predicted
+    ):
+        return None
     by_horse = {int(item["horse_no"]): item for item in predicted}
     winners = [
         int(item["horse_no"]) for item in result["results"]
@@ -794,28 +811,22 @@ def _bootstrap_resolution_warning(alpha: float, samples: int) -> str:
     )
 
 
-def information_gain_vs_market(
+def information_gain_vs_uniform(
     candidate_rows: list[dict],
-    market_rows: list[dict],
+    baseline_rows: list[dict],
     *,
     samples: int = 1000,
     seed: int = 20261024,
     alpha: float = 0.05,
 ) -> dict:
-    """Δf²: candidate pseudo-R² minus market pseudo-R² on aligned races.
-
-    Rows must be paired in the same order and, when present, have matching
-    ``race_id`` and ``runner_count`` values. ``ci95`` retains the historical
-    unadjusted interval; ``ci`` uses ``alpha`` for the promotion policy and is
-    suppressed when the bootstrap cannot resolve its lower tail.
-    """
+    """Δf² against the uniform no-information comparator on aligned races."""
     import random
 
     if not 0 < alpha < 1:
         raise ValueError("alpha must be between 0 and 1")
     empty = {
         "candidate_pseudo_r2": None,
-        "market_pseudo_r2": None,
+        "uniform_pseudo_r2": None,
         "delta": None,
         "ci95": [None, None],
         "ci": [None, None],
@@ -824,22 +835,22 @@ def information_gain_vs_market(
         "ci_resolution_sufficient": False,
         "ci_warning": "Adjusted bootstrap CI unavailable: paired race data are missing or misaligned.",
     }
-    if not candidate_rows or len(candidate_rows) != len(market_rows):
+    if not candidate_rows or len(candidate_rows) != len(baseline_rows):
         return empty
 
-    pairs = list(zip(candidate_rows, market_rows))
-    for candidate, market in pairs:
-        if candidate.get("race_id") != market.get("race_id"):
+    pairs = list(zip(candidate_rows, baseline_rows))
+    for candidate, baseline in pairs:
+        if candidate.get("race_id") != baseline.get("race_id"):
             return empty
         candidate_count = candidate.get("runner_count")
-        market_count = market.get("runner_count")
-        if candidate_count is not None and market_count is not None:
-            if int(candidate_count) != int(market_count):
+        baseline_count = baseline.get("runner_count")
+        if candidate_count is not None and baseline_count is not None:
+            if int(candidate_count) != int(baseline_count):
                 return empty
 
     candidate_f2 = pseudo_r2(candidate_rows)
-    market_f2 = pseudo_r2(market_rows)
-    observed = candidate_f2 - market_f2
+    baseline_f2 = pseudo_r2(baseline_rows)
+    observed = candidate_f2 - baseline_f2
     if len(pairs) == 1 or samples <= 0:
         ci95 = [None, None]
         ci = [None, None]
@@ -852,8 +863,8 @@ def information_gain_vs_market(
         for _ in range(samples):
             indices = [rng.randrange(n) for _ in range(n)]
             resampled_candidate = [pairs[index][0] for index in indices]
-            resampled_market = [pairs[index][1] for index in indices]
-            estimates.append(pseudo_r2(resampled_candidate) - pseudo_r2(resampled_market))
+            resampled_baseline = [pairs[index][1] for index in indices]
+            estimates.append(pseudo_r2(resampled_candidate) - pseudo_r2(resampled_baseline))
         estimates.sort()
         ci95 = [
             estimates[int(0.025 * samples)],
@@ -873,7 +884,7 @@ def information_gain_vs_market(
 
     return {
         "candidate_pseudo_r2": candidate_f2,
-        "market_pseudo_r2": market_f2,
+        "uniform_pseudo_r2": baseline_f2,
         "delta": observed,
         "ci95": ci95,
         "ci": ci,

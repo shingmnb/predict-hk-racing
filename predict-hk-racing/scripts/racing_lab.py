@@ -28,16 +28,18 @@ from domain import (  # noqa: E402
 from drift import period_of, summarize_periods  # noqa: E402
 from decision import coverage_slices, settle_stream  # noqa: E402
 from racing_model import (  # noqa: E402
+    analyze_card,
     apply_calibration,
     bootstrap_logloss_difference,
     expected_calibration_error,
-    information_gain_vs_market,
+    information_gain_vs_uniform,
     isotonic_fit,
     platt_fit,
     fit_model,
     metric_row,
     predict_card,
     summarize_rows,
+    uniform_baseline_card,
 )
 
 VERSION_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
@@ -482,16 +484,16 @@ def command_predict(args) -> dict:
         if datetime.now(timezone.utc) > off_time and not historical:
             raise ValueError("Race has started; use backtest instead of a retrospective prediction")
         version = args.model_version
-        model = None
         if version == "auto":
-            promoted = latest_promoted(db)
-            if promoted:
-                version = promoted
-                model = get_model(db, promoted)
-            else:
-                version = "market-baseline"
-        elif version not in {"baseline", "market-baseline"}:
-            model = get_model(db, version)
+            version = latest_promoted(db)
+            if not version:
+                raise ValueError(
+                    "No promoted model is available; use analyze for evidence-only output, "
+                    "or fit/backtest/promote a model before predict"
+                )
+        if version in {"baseline", "uniform-baseline"}:
+            raise ValueError("Baselines are internal validation comparators, not race-day predictions")
+        model = get_model(db, version)
         prediction = predict_card(card, model, version)
         run_id = "pr_" + uuid.uuid4().hex
         forecast_kind = "historical-reconstruction" if historical else "pre-race"
@@ -509,6 +511,34 @@ def command_predict(args) -> dict:
             ),
         )
     return prediction
+
+
+def command_analyze(args) -> dict:
+    with connect(args.db) as db:
+        card, snapshot_id = latest_card(db, args.race_id, args.snapshot_id)
+        if latest_result(db, args.race_id):
+            raise ValueError("Results already exist; refusing to create retrospective intelligence")
+        off_time = parse_ts(card["race"]["off_time"], "race.off_time")
+        historical = args.historical or card.get("collection_mode", "historical") == "historical"
+        if datetime.now(timezone.utc) > off_time and not historical:
+            raise ValueError("Race has started; cannot create a retrospective live analysis")
+        analysis = analyze_card(card)
+        run_id = "pr_" + uuid.uuid4().hex
+        forecast_kind = "historical-reconstruction" if historical else "pre-race"
+        analysis.update({
+            "run_id": run_id,
+            "snapshot_id": snapshot_id,
+            "created_at": now_iso(),
+            "forecast_kind": forecast_kind,
+        })
+        db.execute(
+            "INSERT INTO prediction_runs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                run_id, args.race_id, snapshot_id, analysis["model_version"], analysis["algorithm"],
+                forecast_kind, analysis["created_at"], card["data_cutoff"], canonical(analysis),
+            ),
+        )
+    return analysis
 
 
 def command_evaluate(args) -> dict:
@@ -533,12 +563,14 @@ def command_evaluate(args) -> dict:
         groups = {}
         pending = 0
         for (version, race_id), row in selected.items():
+            prediction = json.loads(row["payload_json"])
+            if prediction.get("kind") == "race-intelligence-analysis-v1":
+                continue
             card, _ = latest_card(db, race_id, row["snapshot_id"])
             result = latest_result(db, race_id)
             if not result:
                 pending += 1
                 continue
-            prediction = json.loads(row["payload_json"])
             metrics = metric_row(card, result, prediction)
             if not metrics:
                 continue
@@ -669,23 +701,19 @@ def calibration_window_guard(template: dict | None, records: list[dict], test_in
     return through
 
 
-def walk_forward_predictions(records: list[dict], template: dict | None, test_indices: list[int], refit_every: int):
+def walk_forward_predictions(records: list[dict], template: dict, test_indices: list[int], refit_every: int):
     """Yield (record, prediction) pairs under an expanding window."""
     cached = None
     next_refit = -1
     for index in test_indices:
-        if template is None:
-            cached = None
-        elif cached is None or index >= next_refit:
+        if cached is None or index >= next_refit:
             cached = fit_model(records[:index], template["features"], **template["hyperparameters"])
             if template.get("calibration"):
                 cached["calibration"] = template["calibration"]
             cached["model_version"] = template.get("model_version", cached.get("model_version"))
             next_refit = index + refit_every
         record = records[index]
-        prediction = predict_card(
-            record["card"], cached, (template or {}).get("model_version", "market-baseline")
-        )
+        prediction = predict_card(record["card"], cached, template.get("model_version", "fitted-model"))
         yield record, prediction
 
 
@@ -762,8 +790,8 @@ def promotion_eligible(gate: dict) -> bool:
         )
     required = (
         "enough_test_races",
-        "logloss_beats_market_baseline",
-        "brier_not_worse_than_market",
+        "logloss_beats_uniform_baseline",
+        "brier_not_worse_than_uniform",
         "logloss_improvement_ci95_excludes_zero",
         "logloss_improvement_adjusted_ci_excludes_zero",
         "beats_current_champion",
@@ -826,7 +854,7 @@ def command_backtest(args) -> dict:
         baseline_rows = []
         for index in test_indices:
             record = records[index]
-            prediction = predict_card(record["card"], None)
+            prediction = uniform_baseline_card(record["card"])
             metrics = metric_row(record["card"], record["result"], prediction)
             if metrics:
                 baseline_rows.append(metrics)
@@ -838,7 +866,7 @@ def command_backtest(args) -> dict:
         comparison = bootstrap_logloss_difference(
             candidate_rows, baseline_rows, samples=args.bootstrap, alpha=effective_alpha
         )
-        information_gain = information_gain_vs_market(
+        information_gain = information_gain_vs_uniform(
             candidate_rows, baseline_rows, samples=args.bootstrap, alpha=effective_alpha
         )
 
@@ -975,8 +1003,8 @@ def command_backtest(args) -> dict:
         gate = {
             "min_test_races_required": args.min_test_races,
             "enough_test_races": enough,
-            "logloss_beats_market_baseline": beats_baseline,
-            "brier_not_worse_than_market": brier_not_worse,
+            "logloss_beats_uniform_baseline": beats_baseline,
+            "brier_not_worse_than_uniform": brier_not_worse,
             "logloss_improvement_ci95_excludes_zero": significant,
             "logloss_improvement_adjusted_ci_excludes_zero": significant_adjusted,
             "champion_comparison_required": champion_comparison_required,
@@ -1030,15 +1058,15 @@ def command_backtest(args) -> dict:
                 "calibration_through": calibration_through,
             },
             "candidate": candidate_summary,
-            "market_baseline": baseline_summary,
+            "uniform_baseline": baseline_summary,
             "candidate_minus_baseline_logloss": comparison,
-            "information_gain_vs_market": information_gain,
+            "information_gain_vs_uniform": information_gain,
             "champion": champion_summary,
             "candidate_minus_champion_logloss": champion_comparison,
             "ablation": ablation,
             "promotion_gate": gate,
             "per_race": [
-                {"candidate": stripped_row(c), "market_baseline": stripped_row(b)}
+                {"candidate": stripped_row(c), "uniform_baseline": stripped_row(b)}
                 for c, b in zip(candidate_rows, baseline_rows)
             ],
         }
@@ -1060,7 +1088,7 @@ def required_ablation_comparison(
     current_alpha: float,
 ) -> dict | None:
     """Accept only comparable, resolved and independently significant required evidence."""
-    context_keys = ("method", "champion_version", "candidate", "market_baseline", "per_race")
+    context_keys = ("method", "champion_version", "candidate", "uniform_baseline", "per_race")
     if report.get("source_model_hash") != source_model_hash:
         return None
     if any(report.get(key) != latest.get(key) for key in context_keys):
@@ -1180,7 +1208,7 @@ def command_promote(args) -> dict:
             if gate.get("champion_comparison_required"):
                 resolution_comparisons.append(report.get("candidate_minus_champion_logloss") or {})
             if gate.get("information_gain_required"):
-                resolution_comparisons.append(report.get("information_gain_vs_market") or {})
+                resolution_comparisons.append(report.get("information_gain_vs_uniform") or {})
             resolution_comparisons.extend(evidence_comparisons)
             resolution_sufficient = all(
                 item.get("ci_resolution_sufficient") is True for item in resolution_comparisons
@@ -1229,10 +1257,7 @@ def command_promote(args) -> dict:
 
 def command_value_backtest(args) -> dict:
     with connect(args.db) as db:
-        if args.model_version in {"baseline", "market-baseline"}:
-            template = None
-        else:
-            template = get_model(db, args.model_version)
+        template = get_model(db, args.model_version)
         records = load_records(db)
         test_indices = []
         for index, record in enumerate(records):
@@ -1306,7 +1331,9 @@ def calibration_ece_guard(before: float, after: float, *, allow_worse: bool) -> 
 
 
 def prediction_calibration_points(record: dict, prediction: dict) -> list[tuple[float, int]]:
-    """Flatten one race's probabilities without losing race-grouped normalisation."""
+    """Flatten probabilities; intelligence-only analyses have no calibration points."""
+    if prediction.get("kind") == "race-intelligence-analysis-v1":
+        return []
     winners = {
         int(row["horse_no"])
         for row in record["result"]["results"]
@@ -1314,7 +1341,8 @@ def prediction_calibration_points(record: dict, prediction: dict) -> list[tuple[
     }
     return [
         (float(item["win_probability"]), 1 if int(item["horse_no"]) in winners else 0)
-        for item in prediction["runners"]
+        for item in prediction.get("runners", [])
+        if isinstance(item.get("win_probability"), (int, float))
     ]
 
 
@@ -1481,16 +1509,16 @@ def command_calibration_drift(args) -> dict:
             prediction = json.loads(row["payload_json"])
             period = period_of(card["race"]["meeting_date"], mode=args.period)
             points = prediction_calibration_points({"card": card, "result": result}, prediction)
-            grouped.setdefault(version, {}).setdefault(period, []).extend(points)
+            if points:
+                grouped.setdefault(version, {}).setdefault(period, []).extend(points)
 
         models = {}
         for version, by_period in grouped.items():
             model = None
-            if version not in {"market-baseline", "baseline"}:
-                try:
-                    model = get_model(db, version)
-                except ValueError:
-                    model = None
+            try:
+                model = get_model(db, version)
+            except ValueError:
+                model = None
             calibration = (model or {}).get("calibration") or {}
             baseline = calibration.get("ece_after")
             summary = summarize_periods(
@@ -1538,11 +1566,18 @@ def build_parser() -> argparse.ArgumentParser:
                 help="Accept feature names missing from scripts/domain.py (turns off the leakage guard)",
             )
 
-    predict = sub.add_parser("predict", help="Freeze an append-only race prediction")
+    analyze = sub.add_parser("analyze", help="Freeze evidence, counter-evidence and unknowns without probabilities")
+    analyze.add_argument("--db", required=True)
+    analyze.add_argument("--race-id", required=True)
+    analyze.add_argument("--snapshot-id")
+    analyze.add_argument("--historical", action="store_true", help="Label a reconstruction; never use after results are imported")
+    analyze.add_argument("--output")
+
+    predict = sub.add_parser("predict", help="Freeze a fitted-model prediction; no automatic fallback")
     predict.add_argument("--db", required=True)
     predict.add_argument("--race-id", required=True)
     predict.add_argument("--snapshot-id")
-    predict.add_argument("--model-version", default="auto", help="auto, baseline, or a fitted version")
+    predict.add_argument("--model-version", default="auto", help="auto (promoted only) or a fitted version")
     predict.add_argument("--historical", action="store_true", help="Label a reconstruction; never use after results are imported")
     predict.add_argument("--output")
 
@@ -1566,7 +1601,7 @@ def build_parser() -> argparse.ArgumentParser:
     fit = sub.add_parser("fit", help="Fit a candidate conditional-logit model")
     fit.add_argument("--db", required=True)
     fit.add_argument("--model-version", required=True)
-    fit.add_argument("--features", default="market_logp,intent_centered")
+    fit.add_argument("--features", default="intent_centered,rating")
     fit.add_argument("--train-before", required=True, help="Only races with meeting_date before YYYY-MM-DD")
     fit.add_argument("--min-races", type=int, default=30)
     fit.add_argument("--l2", type=float, default=0.01)
@@ -1687,6 +1722,7 @@ def main() -> int:
         handlers = {
             "import-card": command_import_card,
             "import-result": command_import_result,
+            "analyze": command_analyze,
             "predict": command_predict,
             "evaluate": command_evaluate,
             "fit": command_fit,
