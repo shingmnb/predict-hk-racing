@@ -59,6 +59,10 @@
 
 - `references/intel-sources.md`：A/B/C 級消息來源、來源→claim 對應表、賽日 SOP、高價值信號、以及用 intel-only / `--ablate intel` 驗證情報價值的方法。
 
+### Added (real-data validation)
+
+- `references/real-data-validation.md`：861 場官方賽果的外部驗證——建語料、無洩漏特徵、260 場回測（同市場打平，CI ±0.01）、係數隨語料縮向 0、校準與值博數據、CLV 協議與其限制。
+
 ## [0.2.0] - 2026-10-24
 
 ### Added
