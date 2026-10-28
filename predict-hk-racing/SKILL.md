@@ -23,6 +23,7 @@ description: >-
 - 搜集消息、判斷邊條消息有用前，讀 [intel-sources.md](references/intel-sources.md)。
 - 用真實歷史數據驗證模型、或想知 861 場實測結論前，讀 [real-data-validation.md](references/real-data-validation.md)。
 - 評估「去馬／保留／備戰」前，讀 [intent-model.md](references/intent-model.md)。
+- 設計「消息主導、賠率只作參考」的評分／否決權／輸出格式前，讀 [intel-first-odds-reference.md](references/intel-first-odds-reference.md)。
 - 建概率、訓練、回測或修正模型前，讀 [modeling-and-backtesting.md](references/modeling-and-backtesting.md)。
 - 建立 JSON、執行腳本或解讀資料庫前，讀 [schemas-and-cli.md](references/schemas-and-cli.md)。
 - 想用 Obsidian 管理歷史數據、或由舊 notes 遷移，讀 [obsidian-history.md](references/obsidian-history.md)。
