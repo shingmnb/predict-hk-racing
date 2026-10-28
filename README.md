@@ -2,21 +2,21 @@
 
 [![test](https://github.com/shingmnb/predict-hk-racing/actions/workflows/test.yml/badge.svg)](https://github.com/shingmnb/predict-hk-racing/actions/workflows/test.yml)
 
-香港賽馬數據驅動預測 Skill：自動搜集及核實資料、分析能力／形勢／馬房去馬意圖、輸出勝出與位置概率，再用不可覆寫紀錄、時間順序回測及模型升級門檻持續校準。
+香港賽馬情報分析 Skill：自動搜集及核實原件、分析能力／形勢／馬房去馬意圖，保存支持證據、反證及未知項，再用不可覆寫紀錄、賽後核查、時間順序回測及模型升級門檻持續修正。
 
-> 呢個項目處理嘅「去馬」係基於公開證據嘅不確定推論，唔係內幕消息。概率唔係保證；賽馬高方差，請只用可承受損失作娛樂預算。
+> 呢個項目處理嘅「去馬」係基於公開證據嘅不確定推論，唔係內幕消息。冇已驗證模型時只出情報分析，唔會用賠率或均勻值硬砌勝率。賽馬高方差，請只用可承受損失作娛樂預算。
 
 > 發佈狀態：GitHub Actions 會自動執行測試；版本 tag 會觸發 `.skill` 打包、SHA-256 同 GitHub Release。
 
 ## 功能
 
 - **資料快照**：官方來源優先；保存來源、時間戳、退出及臨場更新。
-- **意圖證據模型**：分開能力、形勢、人馬部署同市場；每項判斷附反證及置信度。
-- **概率模型**：市場去水基準、conditional logit、Plackett–Luce 位置概率近似。
-- **審計紀錄**：SQLite 保存賽前快照、預測、賽果、模型版本及評估；主要紀錄 append-only。
-- **專業回測**：expanding-window walk-forward、log loss、Brier、校準及 race-level bootstrap。
-- **機率校準與訓練控制**：isotonic／Platt scaling、ECE；可選時間順序 hold-out early stopping，並還原最佳 epoch。
-- **有門檻學習**：候選模型要跑贏市場及現任 champion 先可 promoted；否則記錄 rejected。
+- **情報分析**：逐匹保存能力、形勢、人馬部署、逐字引文、反證、未知及撤回條件。
+- **原始賠率參考**：只保存可選市場快照與變化，唔會轉成概率或模型特徵。
+- **可選概率模型**：conditional logit、Plackett–Luce 位置概率近似；冇模型時唔出概率。
+- **審計紀錄**：SQLite 保存賽前快照、情報、預測、賽果、模型版本及評估；主要紀錄 append-only。
+- **專業回測**：expanding-window walk-forward、均勻無資訊內部對照、log loss、Brier、校準及 race-level bootstrap。
+- **有門檻學習**：候選模型要通過全部驗收及現任 champion 比較先可 promoted；否則記錄 rejected。
 - **意圖 ablation**：驗證 `intent_centered` 有冇時間外預測價值，唔好用賽果反推動機。
 
 ## 安裝
@@ -38,13 +38,13 @@ cp predict-hk-racing/assets/race-card-template.json racing-data/cards/race.json
 python predict-hk-racing/scripts/racing_lab.py import-card \
   --db racing-data/racing.db --file racing-data/cards/race.json
 
-# 凍結預測；未有任何 promoted 模型時會用市場基準
-python predict-hk-racing/scripts/racing_lab.py predict \
+# 凍結情報分析，不附勝出率
+python predict-hk-racing/scripts/racing_lab.py analyze \
   --db racing-data/racing.db --race-id "<race_id>" \
-  --model-version auto --output racing-data/predictions/<race_id>.json
+  --output racing-data/analyses/<race_id>.json
 ```
 
-賽後結算、訓練、回測及升級命令見 [`schemas-and-cli.md`](predict-hk-racing/references/schemas-and-cli.md)。
+賽後核查、可選模型訓練、回測及升級命令見 [`schemas-and-cli.md`](predict-hk-racing/references/schemas-and-cli.md)。
 
 ## Repo 結構
 
@@ -77,7 +77,7 @@ python tools/package_skill.py --output dist
 
 - 唔好提交真實投注紀錄、個人資料、登入資料、付費內容或 `racing-data/`。
 - 歷史重建唔可以冒充實時預測；任何特徵都要證明喺資料截止時間前已存在。
-- 未夠樣本時使用市場基準，唔好自創權重假裝有已驗證優勢。
+- 未夠樣本或冇 promoted 模型時只用 `analyze` 出情報，唔好自創權重或補概率。
 - 模型表現會漂移；歷史績效唔保證未來，更唔保證投注回報。
 
 ## License
