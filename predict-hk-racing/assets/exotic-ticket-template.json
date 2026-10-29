@@ -1,0 +1,122 @@
+{
+  "schema_version": "exotic-ticket-v1",
+  "rule_version": "exotic-v1",
+  "race_id": "2026-10-25-ST-R1",
+  "created_at": "2026-10-25T10:45:00+08:00",
+  "core_horse_no": 1,
+  "longshot_decision_sha256": "replace-with-canonical-sha256-of-actual-longshot-decision",
+  "market_card_sha256": "replace-with-canonical-sha256-of-actual-market-card",
+  "budget_limit_hkd": 20,
+  "_note": "合成結構示例。正式使用必須換上實際快照 hash、全場審查、原始證據及每個真實馬對；棄選時 core_horse_no=null、combinations=[] 並填 abstain_reason。",
+  "sources": [
+    {
+      "source_id": "S1",
+      "url": "https://example.invalid/sectionals",
+      "retrieved_at": "2026-10-25T09:45:00+08:00",
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "excerpt": "官方分段原文：末段時間較同場大部分馬匹為快，但須配合步速解讀。"
+    },
+    {
+      "source_id": "S2",
+      "url": "https://example.invalid/incidents",
+      "retrieved_at": "2026-10-25T09:46:00+08:00",
+      "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "excerpt": "賽事報告原文：上仗四百米處受困未能望空，其後恢復走勢。"
+    },
+    {
+      "source_id": "S3",
+      "url": "https://example.invalid/audit",
+      "retrieved_at": "2026-10-25T10:42:00+08:00",
+      "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "excerpt": "獨立核查原文：排位及退出資料已於賽前重新核對。"
+    }
+  ],
+  "researchers": [
+    {
+      "agent_id": "A",
+      "role": "form_and_race_shape",
+      "completed_at": "2026-10-25T09:55:00+08:00",
+      "blind_to_other_researcher_output": true,
+      "source_ids": ["S1"]
+    },
+    {
+      "agent_id": "B",
+      "role": "stable_and_intelligence",
+      "completed_at": "2026-10-25T09:56:00+08:00",
+      "blind_to_other_researcher_output": true,
+      "source_ids": ["S2"]
+    }
+  ],
+  "audit": {
+    "agent_id": "C",
+    "started_at": "2026-10-25T10:41:00+08:00",
+    "completed_at": "2026-10-25T10:44:00+08:00",
+    "status": "passed",
+    "critical_errors": [],
+    "recommendations_exposed_before_completion": false,
+    "independent_source_search": true,
+    "source_ids": ["S1", "S3"],
+    "checks": {
+      "identity": true,
+      "timestamps": true,
+      "quotes": true,
+      "counterevidence": true,
+      "candidate_coverage": true
+    }
+  },
+  "combinations": [
+    {
+      "pool": "Q",
+      "horses": [1, 2],
+      "stake_hkd": 10,
+      "scenario_id": "normal-pace",
+      "mechanism": "正常步速下，一馬可跟前保留遮擋，另一馬有同程追趕證據，可同時進入目標名次。",
+      "strongest_counterevidence": "若前段互相消耗，跟前馬亦可能同時失位。",
+      "unknowns": ["賽日臨場健康及實際取位尚未知"],
+      "withdraw_if": "核心馬出現健康異常或配腳退出。",
+      "horse_evidence": [
+        {
+          "horse_no": 1,
+          "agent_id": "A",
+          "family": "sectional",
+          "source_id": "S1",
+          "quote": "末段時間較同場大部分馬匹為快"
+        },
+        {
+          "horse_no": 2,
+          "agent_id": "B",
+          "family": "race_replay",
+          "source_id": "S2",
+          "quote": "上仗四百米處受困未能望空"
+        }
+      ]
+    },
+    {
+      "pool": "PQ",
+      "horses": [1, 2],
+      "stake_hkd": 10,
+      "scenario_id": "normal-pace",
+      "mechanism": "正常步速下，一馬可跟前保留遮擋，另一馬有同程追趕證據，可同時進入目標名次。",
+      "strongest_counterevidence": "若前段互相消耗，跟前馬亦可能同時失位。",
+      "unknowns": ["賽日臨場健康及實際取位尚未知"],
+      "withdraw_if": "核心馬出現健康異常或配腳退出。",
+      "horse_evidence": [
+        {
+          "horse_no": 1,
+          "agent_id": "A",
+          "family": "sectional",
+          "source_id": "S1",
+          "quote": "末段時間較同場大部分馬匹為快"
+        },
+        {
+          "horse_no": 2,
+          "agent_id": "B",
+          "family": "race_replay",
+          "source_id": "S2",
+          "quote": "上仗四百米處受困未能望空"
+        }
+      ]
+    }
+  ],
+  "abstain_reason": null
+}

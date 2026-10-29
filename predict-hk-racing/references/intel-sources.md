@@ -64,45 +64,48 @@ Telegram／X 貼士頻道、YouTube 馬評、討論區。**永遠唔可以直接
 
 ### T-60 至 T-10
 - 全場同時間點賠率快照
-- 賠率跌超過 25% 的馬 → `market_move` claim
+- 賠率只記錄變動幅度與時間窗，另列 `market_move` 市場觀察；25% 之類門檻只可作預先登記的候選假設，未經時間外驗證不得當固定規則或意圖證據
 - 任何新消息（訪問、社交）
 
 ### 賽後
 - 賽事報告：逐匹有冇解釋
 - 段速：頭段／中段／末段對比
 - 獸醫報告增補
-- **把賽前 claim 逐條標記：證實 / 推翻 / 無法判斷**（唯一可建立意圖 ground truth 的方法）
+- **只核對 claim 的可觀察部分：事實是否準確、替代解釋是否出現、預測是否按原規則結算。**唔好用賽果把意圖標成「證實／推翻」；真正意圖 ground truth 通常不可取得
 
-## 由消息到概率的三條紀律
+## 由消息到判斷的三條紀律
 
 1. **去重**：同一新聞被十個媒體轉載 = 一個證據。
-2. **時效**：`observed_at` 超過 14 日權重減半；超過 30 日只作背景。
+2. **時效**：記錄 `observed_at` 與每項資料的適用窗口；「14 日減半／30 日只作背景」只能列候選假設，不得未經時間外驗證自動套用固定權重。
 3. **可證偽**：每條 claim 要寫「什麼情況下作廢」。
 
 ## 哪些消息真的有用
 
-**高價值**：騎師選鞍、配備首次改動、試閘表現（有冇被催／末段有冇加速）、獸醫與傷患、賽後報告的解釋。
+**優先核查（唔等於已證明有預測價值）**：騎師選鞍、配備首次改動、試閘表現（有冇被催／末段有冇加速）、獸醫與傷患、賽後報告的解釋。
 
-**中價值（要標準化）**：晨操時間（必須同同日同組比較）、貼士指數（與賠率高度共線，要 ablation）。
+**需要標準化**：晨操時間（必須同同日同組比較）、貼士指數（與賠率可能共線，要 ablation）。
 
 **陷阱**：「馬房有消息」但無出處、把轉載當多來源、用賽果反推意圖、賽日即場故事當信號。
 
 ## 怎樣證明消息有價值
 
+首先用 `analyze` 保存當時情報，唔需要為每場硬出概率。要驗證情報對勝率有冇增量，先用同一批合格歷史快照訓練兩個可選模型：
+
 ```bash
-fit ... --model-version market-only --features market_logp
-fit ... --model-version intel-only  --features intent_centered,rating
-fit ... --model-version combined \
-  --features market_logp,intent_centered,rating --block intel=intent_centered
-backtest --model-version combined --ablate intel
+fit ... --model-version ability-only --features rating,draw
+fit ... --model-version with-intel \
+  --features intent_centered,rating,draw --block intel=intent_centered
+backtest --model-version with-intel --ablate intel
 ```
 
-| 結果 | 結論 |
+| 結果 | 可以得出的結論 |
 |---|---|
-| intel-only 差過均勻模型 | 情報暫時無預測價值，只可做敍事 |
-| intel-only 接近市場 | 情報有料，值得加大投入 |
-| combined 贏 market 且 `--ablate intel` 顯著 | 情報有獨立價值，可以 promote |
-| 只有 combined 贏、ablate 不顯著 | 贏的是市場特徵，情報只是裝飾 |
+| with-intel 差過均勻無資訊基準 | 暫無證據支持情報有預測價值；保留陰性結果 |
+| with-intel 接近 ability-only | 只值得繼續驗證，不等於情報有獨立價值 |
+| with-intel 改善且 `--ablate intel` 顯著 | 只係情報增量嘅其中一項證據；仍須通過校準、Brier、多重比較、champion 及全部 promote 門檻 |
+| 只有整體改善、ablate 不顯著 | 不可把改善歸因情報；不得宣稱情報有效 |
+
+無論模型結果如何，都要保留事實核查、反證同未知；一場輸贏唔可以證明或推翻馬房真正意圖。
 
 ## 賽日一頁 checklist
 
@@ -114,7 +117,7 @@ backtest --model-version combined --ablate intel
 □ 傷患紀錄（90 日）
 □ 試閘／晨操（同組比較）
 □ 馬房訪問原句（如有）
-□ 賠率快照（T-60 / T-10）
-□ 三條最強情報 + 一條反證
-□ 偏離市場 >15pp 的理由（如適用）
+□ 三條最強情報 + 每條反證／未知／撤回條件
+□ 可選原始賠率快照（T-60 / T-10），只記市場變化
+□ analyze 已凍結；冇模型時沒有硬出勝率
 ```

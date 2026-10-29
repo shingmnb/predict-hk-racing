@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 import math
@@ -20,22 +20,23 @@ from domain import derive_place_slots, quote_supported  # noqa: E402
 from decision import payout_odds, settle_stream  # noqa: E402
 from staking import edge, kelly_fraction, plan_race, stake_size  # noqa: E402
 from racing_model import (  # noqa: E402
+    analyze_card,
     apply_calibration,
     assess_intent,
     bootstrap_logloss_difference,
     expected_calibration_error,
     fit_model,
-    information_gain_vs_market,
+    information_gain_vs_uniform,
     isotonic_apply,
     isotonic_fit,
-    market_probabilities,
+    metric_row,
     pair_probabilities,
     place_probabilities,
     platt_apply,
     platt_fit,
     predict_card,
     pseudo_r2,
-    shin_probabilities,
+    uniform_baseline_card,
 )
 from racing_lab import payload_hash, promotion_eligible  # noqa: E402
 
@@ -43,24 +44,66 @@ CLI = SCRIPTS / "racing_lab.py"
 
 
 class ModelUnitTests(unittest.TestCase):
-    def test_market_probabilities_remove_simple_overround(self):
-        runners = [
-            {"horse_no": 1, "win_odds": 2.0},
-            {"horse_no": 2, "win_odds": 3.0},
-            {"horse_no": 3, "win_odds": 3.0},
-        ]
-        probabilities, complete, overround = market_probabilities(runners)
-        self.assertTrue(complete)
-        self.assertAlmostEqual(overround, 1 / 6)
-        self.assertAlmostEqual(sum(probabilities.values()), 1.0)
-        self.assertAlmostEqual(probabilities[1], 3 / 7)
+    def test_analysis_preserves_evidence_without_inventing_probabilities(self):
+        card = {
+            "data_cutoff": "2026-10-28T09:00:00+08:00",
+            "race": {"race_id": "synthetic-intelligence", "place_slots": 3},
+            "sources": [{
+                "source_id": "S1", "title": "虛構部署原文",
+                "url": "https://example.invalid/intelligence",
+                "retrieved_at": "2026-10-28T09:00:00+08:00",
+            }],
+            "runners": [{
+                "horse_no": 1, "horse_name": "甲", "win_odds": 4.2, "place_odds": 1.8,
+                "features": {"rating": 80},
+                "intent_evidence": [
+                    {"signal": "deployment", "direction": "positive", "source_id": "S1",
+                     "quote": "今仗以爭勝為目標"},
+                    {"signal": "counter_evidence", "direction": "negative", "source_id": "S1",
+                     "quote": "上仗後曾有小毛病"},
+                ],
+            }, {
+                "horse_no": 2, "horse_name": "乙", "win_odds": 6.0,
+                "intent_evidence": [{"direction": "neutral", "source_id": "S1", "quote": "暫無進一步部署"}],
+            }],
+        }
+        analysis = analyze_card(card)
+        self.assertEqual(analysis["kind"], "race-intelligence-analysis-v1")
+        self.assertEqual(analysis["algorithm"], "evidence-intelligence-v1")
+        first = analysis["runners"][0]
+        self.assertEqual(first["supporting_evidence"][0]["quote"], "今仗以爭勝為目標")
+        self.assertEqual(first["supporting_evidence"][0]["source_title"], "虛構部署原文")
+        self.assertEqual(first["opposing_evidence"][0]["quote"], "上仗後曾有小毛病")
+        self.assertEqual(first["win_odds_snapshot"], 4.2)
+        self.assertEqual(first["place_odds_snapshot"], 1.8)
+        self.assertTrue(analysis["runners"][1]["unknowns"])
+        for runner in analysis["runners"]:
+            self.assertNotIn("win_probability", runner)
+            self.assertNotIn("place_probability", runner)
+        result = {"results": [{"horse_no": 1, "finish_position": 1}, {"horse_no": 2, "finish_position": 2}]}
+        self.assertIsNone(metric_row(card, result, analysis))
 
-    def test_incomplete_market_returns_uniform_with_flag(self):
-        runners = [{"horse_no": 1, "win_odds": 2.0}, {"horse_no": 2, "win_odds": None}]
-        probabilities, complete, overround = market_probabilities(runners)
-        self.assertFalse(complete)
-        self.assertIsNone(overround)
-        self.assertEqual(probabilities, {1: 0.5, 2: 0.5})
+    def test_probability_output_requires_a_fitted_model(self):
+        card = {
+            "data_cutoff": "2026-10-28T09:00:00+08:00",
+            "race": {"race_id": "synthetic-guard", "place_slots": 3},
+            "runners": [{"horse_no": 1}, {"horse_no": 2}],
+        }
+        with self.assertRaisesRegex(ValueError, "use analyze_card"):
+            predict_card(card, None)
+
+    def test_uniform_output_is_an_internal_no_information_comparator(self):
+        card = {
+            "data_cutoff": "2026-10-28T09:00:00+08:00",
+            "race": {"race_id": "synthetic-uniform", "place_slots": 1},
+            "runners": [{"horse_no": 1}, {"horse_no": 2}, {"horse_no": 3}, {"horse_no": 4}],
+        }
+        baseline = uniform_baseline_card(card)
+        self.assertEqual(baseline["model_version"], "uniform-baseline")
+        self.assertEqual(baseline["algorithm"], "uniform-no-information-v1")
+        self.assertAlmostEqual(sum(item["win_probability"] for item in baseline["runners"]), 1.0)
+        self.assertTrue(all(item["win_probability"] == 0.25 for item in baseline["runners"]))
+        self.assertIn("唔係賽日預測", baseline["warnings"][0])
 
     def test_place_probabilities_sum_to_slots(self):
         probabilities = [0.4, 0.25, 0.15, 0.1, 0.1]
@@ -70,26 +113,6 @@ class ModelUnitTests(unittest.TestCase):
                 self.assertAlmostEqual(sum(place), slots)
                 self.assertTrue(all(0 < value < 1 for value in place))
                 self.assertEqual(place, sorted(place, reverse=True))
-
-    def test_shin_devig_sums_to_one_and_reduces_favourite_bias(self):
-        runners = [
-            {"horse_no": 1, "win_odds": 1.8},
-            {"horse_no": 2, "win_odds": 3.5},
-            {"horse_no": 3, "win_odds": 7.0},
-            {"horse_no": 4, "win_odds": 10.0},
-        ]
-        normalized, complete, _ = market_probabilities(runners, method="normalized")
-        shin, complete_shin, _ = market_probabilities(runners, method="shin")
-        self.assertTrue(complete and complete_shin)
-        self.assertAlmostEqual(sum(shin.values()), 1.0, places=9)
-        # Shin 修正 longshot bias: 大熱機率調高、冷門調低
-        self.assertGreater(shin[1], normalized[1])
-        self.assertLess(shin[4], normalized[4])
-
-    def test_shin_handles_fair_book(self):
-        fair = shin_probabilities([0.5, 0.25, 0.25])  # book == 1.0
-        self.assertAlmostEqual(sum(fair), 1.0, places=9)
-        self.assertAlmostEqual(fair[0], 0.5, places=9)
 
     def test_pair_probabilities_quinella_sums_to_one(self):
         win = [0.4, 0.25, 0.15, 0.1, 0.1]
@@ -165,18 +188,18 @@ class ModelUnitTests(unittest.TestCase):
         self.assertAlmostEqual(pseudo_r2(rows), 1.0 - 0.5 / math.log(10))
         self.assertIsNone(pseudo_r2([]))
 
-    def test_information_gain_vs_market_detects_improvement(self):
+    def test_information_gain_vs_uniform_detects_improvement(self):
         market = [{"logloss": 0.60, "runner_count": 10} for _ in range(30)]
         candidate = [{"logloss": 0.55, "runner_count": 10} for _ in range(30)]
-        gain = information_gain_vs_market(candidate, market, samples=200)
+        gain = information_gain_vs_uniform(candidate, market, samples=200)
         self.assertGreater(gain["delta"], 0.0)
         self.assertGreater(gain["ci95"][0], 0.0)
         self.assertEqual(gain["race_count"], 30)
-        worse = information_gain_vs_market(market, candidate, samples=200)
+        worse = information_gain_vs_uniform(market, candidate, samples=200)
         self.assertLess(worse["delta"], 0.0)
 
     def test_information_gain_handles_mismatch(self):
-        gain = information_gain_vs_market([{"logloss": 0.5, "runner_count": 8}], [])
+        gain = information_gain_vs_uniform([{"logloss": 0.5, "runner_count": 8}], [])
         self.assertIsNone(gain["delta"])
         self.assertEqual(gain["ci95"], [None, None])
 
@@ -189,12 +212,12 @@ class ModelUnitTests(unittest.TestCase):
             {"race_id": "A", "logloss": 0.8, "runner_count": 5},
             {"race_id": "B", "logloss": 1.9, "runner_count": 20},
         ]
-        gain = information_gain_vs_market(candidate, market, samples=0)
-        expected = gain["candidate_pseudo_r2"] - gain["market_pseudo_r2"]
+        gain = information_gain_vs_uniform(candidate, market, samples=0)
+        expected = gain["candidate_pseudo_r2"] - gain["uniform_pseudo_r2"]
         self.assertAlmostEqual(gain["delta"], expected)
         self.assertAlmostEqual(gain["delta"], 0.06514417228548774)
 
-        misaligned = information_gain_vs_market(candidate, list(reversed(market)), samples=0)
+        misaligned = information_gain_vs_uniform(candidate, list(reversed(market)), samples=0)
         self.assertIsNone(misaligned["delta"])
         self.assertEqual(misaligned["race_count"], 0)
         self.assertEqual(misaligned["ci"], [None, None])
@@ -210,7 +233,7 @@ class ModelUnitTests(unittest.TestCase):
             {"race_id": str(index), "logloss": loss, "runner_count": 10}
             for index, loss in enumerate(candidate_losses)
         ]
-        for function in (bootstrap_logloss_difference, information_gain_vs_market):
+        for function in (bootstrap_logloss_difference, information_gain_vs_uniform):
             with self.subTest(function=function.__name__):
                 default = function(candidate, market, samples=200)
                 adjusted = function(candidate, market, samples=200, alpha=0.025)
@@ -252,7 +275,7 @@ class ModelUnitTests(unittest.TestCase):
         ]
         pairs = list(zip(candidate, market))
         differences = [c["logloss"] - m["logloss"] for c, m in pairs]
-        for function in (bootstrap_logloss_difference, information_gain_vs_market):
+        for function in (bootstrap_logloss_difference, information_gain_vs_uniform):
             with self.subTest(function=function.__name__):
                 rng = random.Random(20261024)
                 estimates = []
@@ -294,8 +317,8 @@ class PromotionGateUnitTests(unittest.TestCase):
         return {
             "min_test_races_required": 2,
             "enough_test_races": True,
-            "logloss_beats_market_baseline": True,
-            "brier_not_worse_than_market": True,
+            "logloss_beats_uniform_baseline": True,
+            "brier_not_worse_than_uniform": True,
             "logloss_improvement_ci95_excludes_zero": True,
             "logloss_improvement_adjusted_ci_excludes_zero": True,
             "champion_comparison_required": True,
@@ -555,7 +578,7 @@ class PipelineIntegrationTests(unittest.TestCase):
             ]
             records.append({"card": card, "result": {"results": results}})
 
-        features = ["cd_place_rate", "recent_finish_mean", "days_since_run", "market_logp"]
+        features = ["cd_place_rate", "recent_finish_mean", "days_since_run", "intent_centered"]
         model = fit_model(
             records,
             features,
@@ -622,16 +645,45 @@ class PipelineIntegrationTests(unittest.TestCase):
         live_path = self.base / "cards" / "live.json"
         self.dump(live_path, live)
         self.run_cli("import-card", "--db", self.db, "--file", live_path)
+        no_model = self.run_cli(
+            "predict", "--db", self.db, "--race-id", live["race"]["race_id"], ok=False,
+        )
+        self.assertIn("use analyze", no_model.stderr)
+        baseline_guard = self.run_cli(
+            "predict", "--db", self.db, "--race-id", live["race"]["race_id"],
+            "--model-version", "uniform-baseline", ok=False,
+        )
+        self.assertIn("not race-day predictions", baseline_guard.stderr)
+        analysis_path = self.base / "predictions" / "live-analysis.json"
+        self.run_cli(
+            "analyze", "--db", self.db, "--race-id", live["race"]["race_id"],
+            "--output", analysis_path,
+        )
+        analysis = json.loads(analysis_path.read_text(encoding="utf-8"))
+        self.assertEqual(analysis["model_version"], "intelligence-analysis")
+        self.assertTrue(any(item["deployment_support"]["score"] == 50 for item in analysis["runners"]))
+        self.assertTrue(all("win_probability" not in item for item in analysis["runners"]))
+        self.assertTrue(all("place_probability" not in item for item in analysis["runners"]))
+
+        model_path = self.base / "models" / "candidate.json"
+        self.run_cli(
+            "fit", "--db", self.db, "--model-version", "candidate-v1",
+            "--features", "intent_centered,rating,draw,cd_place_rate,recent_finish_mean",
+            "--train-before", "2026-10-09", "--min-races", 8, "--epochs", 120,
+            "--output", model_path,
+        )
+        model = json.loads(model_path.read_text(encoding="utf-8"))
+        self.assertEqual(model["training"]["race_count"], 8)
+        self.assertTrue(all(math.isfinite(value) for value in model["coefficients"].values()))
         prediction_path = self.base / "predictions" / "live.json"
         self.run_cli(
             "predict", "--db", self.db, "--race-id", live["race"]["race_id"],
-            "--output", prediction_path,
+            "--model-version", "candidate-v1", "--output", prediction_path,
         )
         prediction = json.loads(prediction_path.read_text(encoding="utf-8"))
-        self.assertEqual(prediction["model_version"], "market-baseline")
+        self.assertEqual(prediction["model_version"], "candidate-v1")
         self.assertAlmostEqual(sum(item["win_probability"] for item in prediction["runners"]), 1.0)
         self.assertAlmostEqual(sum(item["place_probability"] for item in prediction["runners"]), 3.0)
-        self.assertTrue(any(item["intent"]["score"] == 50 for item in prediction["runners"]))
 
         order = [runner["horse_no"] for runner in live["runners"]]
         live_result = {
@@ -648,24 +700,14 @@ class PipelineIntegrationTests(unittest.TestCase):
         self.dump(live_result_path, live_result)
         self.run_cli("import-result", "--db", self.db, "--file", live_result_path)
         self.run_cli(
-            "predict", "--db", self.db, "--race-id", live["race"]["race_id"],
+            "analyze", "--db", self.db, "--race-id", live["race"]["race_id"],
             "--historical", ok=False,
         )
         evaluation_path = self.base / "evaluations" / "live.json"
         self.run_cli("evaluate", "--db", self.db, "--output", evaluation_path)
         evaluation = json.loads(evaluation_path.read_text(encoding="utf-8"))
-        self.assertEqual(evaluation["models"]["market-baseline"]["race_count"], 1)
-
-        model_path = self.base / "models" / "candidate.json"
-        self.run_cli(
-            "fit", "--db", self.db, "--model-version", "candidate-v1",
-            "--features", "market_logp,intent_centered,rating,draw,cd_place_rate,recent_finish_mean",
-            "--train-before", "2026-10-09", "--min-races", 8, "--epochs", 120,
-            "--output", model_path,
-        )
-        model = json.loads(model_path.read_text(encoding="utf-8"))
-        self.assertEqual(model["training"]["race_count"], 8)
-        self.assertTrue(all(math.isfinite(value) for value in model["coefficients"].values()))
+        self.assertEqual(evaluation["models"]["candidate-v1"]["race_count"], 1)
+        self.assertNotIn("intelligence-analysis", evaluation["models"])
         backtest_path = self.base / "evaluations" / "backtest.json"
         self.run_cli(
             "backtest", "--db", self.db, "--model-version", "candidate-v1",
@@ -674,7 +716,7 @@ class PipelineIntegrationTests(unittest.TestCase):
         )
         backtest = json.loads(backtest_path.read_text(encoding="utf-8"))
         self.assertEqual(backtest["candidate"]["race_count"], 5)
-        self.assertEqual(backtest["market_baseline"]["race_count"], 5)
+        self.assertEqual(backtest["uniform_baseline"]["race_count"], 5)
         self.assertFalse(backtest["promotion_gate"]["eligible"])
         promotion = self.run_cli("promote", "--db", self.db, "--model-version", "candidate-v1")
         self.assertEqual(json.loads(promotion.stdout)["event"], "rejected")
@@ -691,7 +733,7 @@ class PipelineIntegrationTests(unittest.TestCase):
             connection.close()
         self.run_cli(
             "fit", "--db", self.db, "--model-version", "candidate-v2",
-            "--features", "market_logp,rating", "--train-before", "2026-10-09",
+            "--features", "rating", "--train-before", "2026-10-09",
             "--min-races", 8, "--epochs", 80,
         )
         champion_path = self.base / "evaluations" / "champion.json"
@@ -732,6 +774,15 @@ class PipelineIntegrationTests(unittest.TestCase):
         card["race"].pop("place_slots", None)
         card["sources"][0]["url"] = "https://example.invalid/synthetic"
         card["sources"][0]["excerpt"] = "練馬師表示，今仗以爭勝為目標，並會交由主帥策騎。"
+        card["sources"][0].update({
+            "available_at": card["data_cutoff"],
+            "sha256": "0" * 64,
+            "availability_evidence": {
+                "kind": "session_attachment",
+                "reference": "synthetic-source.json",
+                "sha256": "1" * 64,
+            },
+        })
         for runner in card["runners"]:
             for item in runner["intent_evidence"]:
                 item["quote"] = "今仗以爭勝為目標"
@@ -772,14 +823,13 @@ class PipelineIntegrationTests(unittest.TestCase):
         accepted = self.run_cli("import-card", "--db", self.db, "--file", good_path)
         self.assertFalse(json.loads(accepted.stdout)["duplicate"])
 
-    def test_evaluate_scores_pre_race_predictions_only(self):
+    def test_evaluate_skips_intelligence_analysis(self):
         card, _ = self.make_card("2026-01-05")
         card_path = self.base / "cards" / "recon.json"
         self.dump(card_path, card)
         self.run_cli("import-card", "--db", self.db, "--file", card_path)
-        # A reconstruction created after the race must not enter the KPI.
         self.run_cli(
-            "predict", "--db", self.db, "--race-id", card["race"]["race_id"], "--historical"
+            "analyze", "--db", self.db, "--race-id", card["race"]["race_id"], "--historical"
         )
         order = [runner["horse_no"] for runner in card["runners"]]
         result = {
@@ -803,7 +853,7 @@ class PipelineIntegrationTests(unittest.TestCase):
         legacy = json.loads(
             self.run_cli("evaluate", "--db", self.db, "--all-kinds").stdout
         )
-        self.assertEqual(legacy["models"]["market-baseline"]["race_count"], 1)
+        self.assertEqual(legacy["models"], {})
 
     def test_place_slots_follow_declared_field_size(self):
         card, _ = self.make_card("2026-10-03")
@@ -815,11 +865,12 @@ class PipelineIntegrationTests(unittest.TestCase):
             self.run_cli("import-card", "--db", self.db, "--file", card_path).stdout
         )
         self.assertFalse(any("place_slots" in w for w in imported["warnings"]))
-        prediction = json.loads(
-            self.run_cli(
-                "predict", "--db", self.db, "--race-id", card["race"]["race_id"]
-            ).stdout
-        )
+        with closing(sqlite3.connect(self.db)) as connection:
+            stored_card = json.loads(connection.execute(
+                "SELECT payload_json FROM card_snapshots WHERE race_id = ?",
+                (card["race"]["race_id"],),
+            ).fetchone()[0])
+        prediction = uniform_baseline_card(stored_card)
         self.assertEqual(prediction["place_slots"], 2)
         self.assertAlmostEqual(
             sum(item["place_probability"] for item in prediction["runners"]), 2.0
@@ -881,7 +932,7 @@ class PipelineIntegrationTests(unittest.TestCase):
             "algorithm": "conditional-logit-v1",
             "model_version": version,
             "created_at": "2026-08-08T00:00:00+00:00",
-            "features": ["market_logp", "intent_centered", "rating"],
+            "features": ["intent_centered", "intent_centered", "rating"],
             "feature_blocks": {
                 "intent": ["intent_centered"],
                 "rating": ["rating"],
@@ -916,8 +967,8 @@ class PipelineIntegrationTests(unittest.TestCase):
         ablation_recorded = ablation_block is not None
         gate = {
             "enough_test_races": True,
-            "logloss_beats_market_baseline": True,
-            "brier_not_worse_than_market": True,
+            "logloss_beats_uniform_baseline": True,
+            "brier_not_worse_than_uniform": True,
             "logloss_improvement_ci95_excludes_zero": True,
             "logloss_improvement_adjusted_ci_excludes_zero": True,
             "champion_comparison_required": False,
@@ -975,7 +1026,7 @@ class PipelineIntegrationTests(unittest.TestCase):
                 "bootstrap_samples": 1000,
             },
             "candidate": {"logloss": 0.4, "brier": 0.2, "race_count": 2},
-            "market_baseline": {"logloss": 0.5, "brier": 0.25, "race_count": 2},
+            "uniform_baseline": {"logloss": 0.5, "brier": 0.25, "race_count": 2},
             "candidate_minus_baseline_logloss": {
                 "ci95": [-0.20, -0.05],
                 "ci": [-0.25, -0.04],
@@ -983,7 +1034,7 @@ class PipelineIntegrationTests(unittest.TestCase):
                 "ci_resolution_sufficient": True,
                 "ci_warning": None,
             },
-            "information_gain_vs_market": {
+            "information_gain_vs_uniform": {
                 "ci_resolution_sufficient": True,
                 "ci_warning": None,
             },
@@ -993,7 +1044,7 @@ class PipelineIntegrationTests(unittest.TestCase):
             "promotion_gate": gate,
             "per_race": [{
                 "candidate": {"race_id": "synthetic-race", "logloss": 0.4},
-                "market_baseline": {"race_id": "synthetic-race", "logloss": 0.5},
+                "uniform_baseline": {"race_id": "synthetic-race", "logloss": 0.5},
             }],
         }
         if calibration_evidence:
@@ -1019,7 +1070,7 @@ class PipelineIntegrationTests(unittest.TestCase):
         self.build_history(1, 8)
         self.run_cli(
             "fit", "--db", self.db, "--model-version", "value-v1",
-            "--features", "market_logp,rating", "--train-before", "2026-08-08",
+            "--features", "rating", "--train-before", "2026-08-08",
             "--min-races", 6, "--epochs", 60,
         )
         settlement = json.loads(
@@ -1058,13 +1109,22 @@ class PipelineIntegrationTests(unittest.TestCase):
 
     def test_evaluate_reports_selective_use_bands(self):
         self.run_cli("init", "--db", self.db)
+        self.build_history(1, 8)
+        self.run_cli(
+            "fit", "--db", self.db, "--model-version", "selective-v1",
+            "--features", "intent_centered,rating", "--train-before", "2026-08-08",
+            "--min-races", 6, "--epochs", 20,
+        )
         for index in range(4):
             date = f"2026-09-{index + 1:02d}"
             card, probabilities = self.make_card(date)
             card_path = self.base / "cards" / f"s{index}.json"
             self.dump(card_path, card)
             self.run_cli("import-card", "--db", self.db, "--file", card_path)
-            self.run_cli("predict", "--db", self.db, "--race-id", card["race"]["race_id"])
+            self.run_cli(
+                "predict", "--db", self.db, "--race-id", card["race"]["race_id"],
+                "--model-version", "selective-v1",
+            )
             winner = self.rng.choices(
                 [r["horse_no"] for r in card["runners"]], weights=probabilities, k=1
             )[0]
@@ -1075,7 +1135,7 @@ class PipelineIntegrationTests(unittest.TestCase):
         report = json.loads(
             self.run_cli("evaluate", "--db", self.db, "--all-kinds", "--coverage", "50").stdout
         )
-        bands = report["models"]["market-baseline"]["selective_use"]
+        bands = report["models"]["selective-v1"]["selective_use"]
         self.assertEqual(bands[0]["coverage_pct"], 50)
         self.assertEqual(bands[0]["race_count"], 2)
 
@@ -1084,7 +1144,7 @@ class PipelineIntegrationTests(unittest.TestCase):
         self.build_history(1, 8)
         self.run_cli(
             "fit", "--db", self.db, "--model-version", "resolution-v1",
-            "--features", "market_logp,rating", "--train-before", "2026-08-08",
+            "--features", "rating", "--train-before", "2026-08-08",
             "--min-races", 6, "--epochs", 20,
         )
         connection = sqlite3.connect(self.db)
@@ -1116,7 +1176,7 @@ class PipelineIntegrationTests(unittest.TestCase):
             ).stdout
         )
         baseline = report["candidate_minus_baseline_logloss"]
-        information_gain = report["information_gain_vs_market"]
+        information_gain = report["information_gain_vs_uniform"]
         for comparison in (baseline, information_gain):
             self.assertEqual(comparison["alpha"], 0.001)
             self.assertEqual(comparison["ci"], [None, None])
@@ -1145,7 +1205,7 @@ class PipelineIntegrationTests(unittest.TestCase):
         self.build_history(1, 10)
         self.run_cli(
             "fit", "--db", self.db, "--model-version", "abl-v1",
-            "--features", "market_logp,intent_centered,rating",
+            "--features", "intent_centered,rating",
             "--block", "intent=intent_centered", "--required-block", "intent",
             "--train-before", "2026-08-08", "--min-races", 6, "--epochs", 40,
         )
@@ -1179,7 +1239,7 @@ class PipelineIntegrationTests(unittest.TestCase):
 
         self.run_cli(
             "fit", "--db", self.db, "--model-version", "abl-v2",
-            "--features", "market_logp,intent_centered,rating",
+            "--features", "intent_centered,rating",
             "--block", "intent=intent_centered", "--required-block", "intent",
             "--train-before", "2026-08-08", "--min-races", 6, "--epochs", 20,
         )
@@ -1194,7 +1254,7 @@ class PipelineIntegrationTests(unittest.TestCase):
         self.assertEqual(second_gate["candidates_in_family"], 2)
         self.assertEqual(second_gate["effective_alpha"], 0.025)
         self.assertEqual(without_ablation["candidate_minus_baseline_logloss"]["alpha"], 0.025)
-        self.assertEqual(without_ablation["information_gain_vs_market"]["alpha"], 0.025)
+        self.assertEqual(without_ablation["information_gain_vs_uniform"]["alpha"], 0.025)
         promotion = json.loads(
             self.run_cli("promote", "--db", self.db, "--model-version", "abl-v2").stdout
         )
@@ -1225,7 +1285,7 @@ class PipelineIntegrationTests(unittest.TestCase):
         self.build_history(1, 3)
         failed = self.run_cli(
             "fit", "--db", self.db, "--model-version", "undeclared-required",
-            "--features", "market_logp", "--required-block", "intent",
+            "--features", "intent_centered", "--required-block", "intent",
             "--train-before", "2026-08-04", "--min-races", 2, "--epochs", 5,
             ok=False,
         )
@@ -1357,7 +1417,7 @@ class PipelineIntegrationTests(unittest.TestCase):
         self.build_history(1, 10)
         self.run_cli(
             "fit", "--db", self.db, "--model-version", "opt-v1",
-            "--features", "market_logp,intent_centered,rating",
+            "--features", "intent_centered,rating",
             "--block", "intent=intent_centered",
             "--train-before", "2026-08-08", "--min-races", 6, "--epochs", 20,
         )
@@ -1378,7 +1438,7 @@ class PipelineIntegrationTests(unittest.TestCase):
         self.build_history(1, 10)
         self.run_cli(
             "fit", "--db", self.db, "--model-version", "req-v1",
-            "--features", "market_logp,intent_centered,rating",
+            "--features", "intent_centered,rating",
             "--block", "intent=intent_centered", "--required-block", "intent",
             "--train-before", "2026-08-08", "--min-races", 6, "--epochs", 20,
         )
@@ -1403,7 +1463,7 @@ class PipelineIntegrationTests(unittest.TestCase):
         self.build_history(1, 20)
         self.run_cli(
             "fit", "--db", self.db, "--model-version", "cal-base",
-            "--features", "market_logp,rating", "--train-before", "2026-08-12",
+            "--features", "rating", "--train-before", "2026-08-12",
             "--min-races", 8, "--epochs", 40,
         )
         calibration = json.loads(
@@ -1499,7 +1559,7 @@ class PipelineIntegrationTests(unittest.TestCase):
         self.build_history(1, 10)
         self.run_cli(
             "fit", "--db", self.db, "--model-version", "cal-no-post",
-            "--features", "market_logp,rating", "--train-before", "2026-08-11",
+            "--features", "rating", "--train-before", "2026-08-11",
             "--min-races", 8, "--epochs", 10,
         )
         failed = self.run_cli(
@@ -1520,7 +1580,7 @@ class PipelineIntegrationTests(unittest.TestCase):
         self.build_history(1, 12)
         self.run_cli(
             "fit", "--db", self.db, "--model-version", "cal-short-post",
-            "--features", "market_logp,rating", "--train-before", "2026-08-11",
+            "--features", "rating", "--train-before", "2026-08-11",
             "--min-races", 8, "--epochs", 10,
         )
         failed = self.run_cli(
@@ -1544,7 +1604,7 @@ class PipelineIntegrationTests(unittest.TestCase):
         self.build_history(1, 16)
         self.run_cli(
             "fit", "--db", self.db, "--model-version", "cb-base",
-            "--features", "market_logp,rating", "--train-before", "2026-08-10",
+            "--features", "rating", "--train-before", "2026-08-10",
             "--min-races", 8, "--epochs", 30,
         )
         calibration = json.loads(
@@ -1867,6 +1927,13 @@ class ReconstructionCardTests(unittest.TestCase):
             "sources": [{
                 "source_id": "S1", "title": "HKJC results", "url": "https://example.invalid/r",
                 "retrieved_at": retrieved,
+                "available_at": "2026-06-24T08:00:00+08:00",
+                "sha256": "0" * 64,
+                "availability_evidence": {
+                    "kind": "session_attachment",
+                    "reference": "synthetic-source.json",
+                    "sha256": "1" * 64,
+                },
             }],
             "runners": [
                 {"horse_no": 1, "horse_name": "A", "features": {}},
