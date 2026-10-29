@@ -1,0 +1,54 @@
+{
+  "schema_version": "longshot-decision-v1",
+  "rule_version": "longshot-v1",
+  "race_id": "2026-10-25-ST-R1",
+  "created_at": "2026-10-25T10:40:00+08:00",
+  "fundamental_created_at": "2026-10-25T09:50:00+08:00",
+  "fundamental_run_id": "replace-with-frozen-analysis-run-id",
+  "market_blind": true,
+  "snapshot_policy": "closest-to-T-2h-within-T-3h-T-2h",
+  "_note": "只係合成結構示例。正式使用時，reviews 必須涵蓋合格 T-2h 快照內全部 10 倍以上 active 馬；冇入選就填 abstain_reason。",
+  "sources": [
+    {
+      "source_id": "S1",
+      "title": "上仗官方競賽事件報告（合成示例）",
+      "url": "https://example.invalid/replay-report",
+      "retrieved_at": "2026-10-25T09:40:00+08:00",
+      "excerpt": "官方原文：上仗四百米處受困未能望空，其後恢復走勢。"
+    },
+    {
+      "source_id": "S2",
+      "title": "上仗官方分段紀錄（合成示例）",
+      "url": "https://example.invalid/sectionals",
+      "retrieved_at": "2026-10-25T09:42:00+08:00",
+      "excerpt": "官方原文：末段時間較同場大部分馬匹為快，但須連同步速及走位解讀。"
+    }
+  ],
+  "reviews": [
+    {
+      "horse_no": 1,
+      "status": "selected",
+      "evidence": [
+        {
+          "family": "race_replay",
+          "source_id": "S1",
+          "quote": "上仗四百米處受困未能望空"
+        },
+        {
+          "family": "sectional",
+          "source_id": "S2",
+          "quote": "末段時間較同場大部分馬匹為快"
+        }
+      ],
+      "strongest_counterevidence": "上仗整體名次仍屬一般，單一受困事件未必解釋全部落差。",
+      "unknowns": ["賽日健康及臨場體重尚未核實"],
+      "withdraw_if": "賽前確認健康異常，或影片與受困原文不符。"
+    },
+    {
+      "horse_no": 2,
+      "status": "rejected",
+      "reason": "只有降班一項訊號，缺乏第二類獨立證據。"
+    }
+  ],
+  "abstain_reason": null
+}
